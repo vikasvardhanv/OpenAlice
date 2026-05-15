@@ -2,46 +2,55 @@ import { tool } from 'ai'
 import { z } from 'zod'
 
 /**
- * notify_user — Alice's structured way to express "deliver this to
- * the user" intent during autonomous work.
+ * notify_user — **DEPRECATED legacy tool**.
  *
- * Used by the heartbeat trigger source to replace the legacy STATUS
- * regex protocol (`STATUS: HEARTBEAT_OK | CHAT_YES + CONTENT: ...`).
- * The runner-side outputGate inspects the captured tool calls in
- * `ProviderResult.toolCalls`; if `notify_user` was invoked, the gate
- * routes the tool's `text` arg through the configured dedup window
- * and into `connectorCenter.notify`.
+ * Exists only to serve the Automation legacy path (heartbeat / cron /
+ * external `task.requested`) which pre-dates Workspace. The AgentWork
+ * outputGate inspects `ProviderResult.toolCalls` for this name and
+ * routes the `text` arg through dedup → `connectorCenter.notify` →
+ * the legacy NotificationsStore.
+ *
+ * Workspace-era agents should use `inbox_push` (exposed at
+ * `/mcp/:wsId`) instead — it writes to the new workspace-anchored
+ * Inbox and supports docs + comments. `notify_user` plain-text
+ * notifications are a strictly lesser surface and exist only so the
+ * pre-Workspace Automation flows keep working until they retire.
  *
  * **Why no side-effects in execute**: the actual delivery is gated
- * by the AgentWork outputGate (heartbeat applies dedup, future
- * triggers might apply other policies). Putting `connectorCenter.notify`
- * inside the tool's execute would make those gates impossible without
- * per-tool-instance source state. The runner-side gate is the right
- * control point. The tool's job is purely to signal intent + arguments.
+ * by the AgentWork outputGate; this tool is intent-only and the
+ * runner is the control point.
  *
- * Globally registered by ToolCenter — every session sees it in its
- * tool catalog. But only sessions whose persona prompt teaches Alice
- * when to call it (today: heartbeat) actually exercise it. cron and
- * task-router sessions don't reference it in their preambles, so AI
- * keeps its current "every reply pushes" behaviour.
+ * Globally registered by ToolCenter — visible to every session. The
+ * description below tries to dissuade workspace agents from picking
+ * it accidentally; if you find a workspace agent still reaching for
+ * it, treat that as a description-tuning bug, not a tool-registration
+ * one (removing it would break the heartbeat / cron paths that
+ * legitimately depend on it).
  */
 export function createNotifyUserTool() {
   return {
     notify_user: tool({
       description: [
-        'Send a notification to the user. Use this during autonomous',
-        'work (heartbeat / cron / external task) when something is',
-        'worth surfacing — a market event, a finished analysis,',
-        'a heads-up. Write the body in the user\'s language. Do not',
-        'call this redundantly — one call per cycle is the norm. If',
-        'nothing is worth flagging, simply do not call this tool.',
+        '[DEPRECATED — legacy Automation path only]',
+        'Send a plain-text notification through the legacy',
+        'NotificationsStore.',
+        '',
+        'Do NOT use this tool if you are inside a Workspace —',
+        'use `inbox_push` instead (exposed at the workspace-scoped',
+        'MCP server). `inbox_push` supports doc references + markdown',
+        'comments and is the correct path for workspace agents.',
+        '',
+        'This tool exists only for pre-Workspace Automation flows',
+        '(heartbeat / cron / external task.requested triggers) whose',
+        'AgentWork outputGate inspects this tool call. If neither of',
+        'those is your context, do not call this.',
       ].join(' '),
       inputSchema: z.object({
         text: z
           .string()
           .min(1)
           .describe(
-            'The notification body, in the user\'s language. Keep it concise — under ~300 chars where possible.',
+            'The notification body, in the user\'s language. Keep it concise — under ~300 chars where possible. Plain text only; markdown is not rendered downstream.',
           ),
         urgency: z
           .enum(['info', 'important'])
