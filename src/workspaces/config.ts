@@ -42,7 +42,12 @@ const DEFAULT_SHUTDOWN_MS = 5_000;
 const DEFAULT_REPLAY_BYTES = 512 * 1024;
 const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 60_000;
 
-const DEFAULT_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+const DEFAULT_ORIGINS = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:3002',
+  'http://127.0.0.1:3002',
+];
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const port = parseIntEnv(env['PORT'], DEFAULT_PORT, 1, 65535);
