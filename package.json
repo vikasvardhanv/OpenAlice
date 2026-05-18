@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/electron/main.js",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "tsx scripts/dev.ts",
+    "dev:backend": "tsx watch src/main.ts",
     "dev:ui": "pnpm --filter open-alice-ui dev",
     "predev": "turbo run build --filter=@traderalice/opentypebb --filter=@traderalice/ibkr",
     "prebuild": "tsx scripts/build-migration-index.ts",

@@ -5,17 +5,25 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 /**
- * Read the backend web port from `data/config/connectors.json` (single
- * source of truth). Defaults to 3002 — the schema default — if the file
- * doesn't exist yet or is malformed, with a clear warning so contributors
- * notice instead of silently proxying to a stale port.
+ * Resolve the backend port Vite should proxy /api/* to. Two source paths:
  *
- * This intentionally does NOT consult `OPENALICE_WEB_PORT` env: that env
- * channel is for guardian → backend at spawn time. Vite is contributor-dev
- * tooling, started independently by the developer, and pairs naturally
- * with `pnpm dev` which reads from the same config file.
+ *   1. `OPENALICE_BACKEND_PORT` env — set by `scripts/dev.ts` orchestrator
+ *      when invoked via `pnpm dev`. Guaranteed to match the port the
+ *      backend was spawned on; drift-free.
+ *
+ *   2. `data/config/connectors.json` web.port — used when Vite is run
+ *      standalone (`pnpm dev:ui`), without orchestrator. Stale only if
+ *      the user manually started backend on a different port than
+ *      configured, in which case the standalone workflow is on them.
+ *
+ * Default 3002 if both sources unusable, with a clear warning.
  */
 function readBackendPort(): number {
+  // Env wins — set by the dev orchestrator. No drift with backend.
+  const envPort = Number.parseInt(process.env['OPENALICE_BACKEND_PORT'] ?? '', 10)
+  if (Number.isFinite(envPort) && envPort > 0 && envPort <= 65535) return envPort
+
+  // Fallback: read the same file backend reads.
   const configPath = resolve(__dirname, '..', 'data', 'config', 'connectors.json')
   try {
     const raw = readFileSync(configPath, 'utf-8')
