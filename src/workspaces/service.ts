@@ -9,7 +9,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import { claudeAdapter } from './adapters/claude.js';
 import { codexAdapter } from './adapters/codex.js';
@@ -19,12 +19,29 @@ import { loadConfig, type ServerConfig } from './config.js';
 import { logger as launcherLogger } from './logger.js';
 import { ScrollbackStore } from './scrollback-store.js';
 import { SessionPool, type SessionFactoryContext } from './session-pool.js';
-import { SessionRegistry } from './session-registry.js';
+import { SessionRegistry, type SessionRecord } from './session-registry.js';
 import { buildSpawnEnv } from './spawn-env.js';
 import { TemplateRegistry } from './template-registry.js';
 import { TranscriptWatcher } from './transcript-watcher.js';
 import { WorkspaceCreator } from './workspace-creator.js';
 import { WorkspaceRegistry, type WorkspaceMeta } from './workspace-registry.js';
+
+/**
+ * The fully-resolved spawn plan for a (workspace, adapter, resume-intent)
+ * triple. Computed by the same code path the pool's factory uses, so a
+ * dry-run snapshot (diagnostics endpoint) and a live spawn agree on every
+ * field — including the path-related ones that this whole debugging
+ * scaffold exists to compare.
+ */
+export interface SpawnPlan {
+  readonly resumeMode: 'fresh' | 'last' | 'by-id';
+  readonly resumeId: string | null;
+  readonly composedCommand: readonly string[];
+  readonly spawnCwd: string;
+  readonly envPWD: string | null;
+  readonly transcriptDir: string | null;
+  readonly projectKey: string | null;
+}
 
 export interface WorkspaceService {
   readonly config: ServerConfig;
@@ -38,6 +55,15 @@ export interface WorkspaceService {
   readonly transcriptWatcher: TranscriptWatcher;
   resolveAdapter(meta: WorkspaceMeta, agentId?: string): CliAdapter;
   publicMeta(w: WorkspaceMeta): Promise<unknown>;
+  /**
+   * Compute what a spawn would do, without actually spawning. The same code
+   * path the pool's factory uses internally — dry-run and live can't drift.
+   */
+  computeSpawnPlan(
+    meta: WorkspaceMeta,
+    adapter: CliAdapter,
+    resume: SessionFactoryContext['resume'],
+  ): SpawnPlan;
   isShuttingDown(): boolean;
   dispose(reason: string): Promise<void>;
 }
@@ -50,6 +76,22 @@ export interface CreateWorkspaceServiceOptions {
    *  fallback bridge resolves to the live backend (not whatever was the
    *  default in template files). */
   readonly mcpPort: number;
+}
+
+/**
+ * Pick a resume intent from a persisted record + the adapter's capabilities.
+ * Mirrors the logic the resume route used to inline (now consumed by both
+ * the resume route and the diagnostics endpoint).
+ */
+export function resumeFromRecord(
+  record: SessionRecord,
+  adapter: CliAdapter,
+): SessionFactoryContext['resume'] {
+  if (record.resumeHint && adapter.capabilities.resumeById) {
+    return { sessionId: record.resumeHint.value };
+  }
+  if (adapter.capabilities.resumeLast) return 'last';
+  return undefined;
 }
 
 export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions): Promise<WorkspaceService> {
@@ -123,6 +165,36 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     return adapters.resolve(null);
   };
 
+  const computeSpawnPlan = (
+    ws: WorkspaceMeta,
+    adapter: CliAdapter,
+    resume: SessionFactoryContext['resume'],
+  ): SpawnPlan => {
+    const baseEnv = buildSpawnEnv(process.env, {
+      AQ_WS_ID: ws.id,
+      AQ_LAUNCHER_REPO_ROOT: config.launcherRepoRoot,
+      OPENALICE_MCP_URL: `http://127.0.0.1:${opts.mcpPort}/mcp`,
+    }, ws.dir);
+    const spawnCtx = {
+      ...(resume !== undefined ? { resume } : {}),
+      cwd: ws.dir,
+      env: baseEnv,
+    };
+    const adapterEnv = adapter.composeEnv?.(spawnCtx) ?? {};
+    const env = { ...baseEnv, ...adapterEnv };
+    const composedCommand = adapter.composeCommand(config.command, spawnCtx);
+    const transcriptDir = adapter.transcriptDir ? adapter.transcriptDir(ws.dir) : null;
+    return {
+      resumeMode: resume === undefined ? 'fresh' : resume === 'last' ? 'last' : 'by-id',
+      resumeId: resume && resume !== 'last' ? resume.sessionId : null,
+      composedCommand,
+      spawnCwd: ws.dir,
+      envPWD: env['PWD'] ?? null,
+      transcriptDir,
+      projectKey: transcriptDir ? basename(transcriptDir) : null,
+    };
+  };
+
   const pool = new SessionPool(
     (wsId, ctx) => {
       const ws = registry.get(wsId);
@@ -148,9 +220,34 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
       // adapter wins on key collisions.
       const adapterEnv = adapter.composeEnv?.(spawnCtx) ?? {};
       const env = { ...baseEnv, ...adapterEnv };
+      const composedCommand = adapter.composeCommand(config.command, spawnCtx);
+      const transcriptDir = adapter.transcriptDir ? adapter.transcriptDir(ws.dir) : null;
+
+      // path.trace — single line capturing every path the spawn touches. The
+      // raison d'être of the workspace-sessions.log file: any two fields that
+      // should be equal but aren't are the bug, eyeball-comparable. Keep this
+      // verbose; the file is grep-only, not human-tailed.
+      launcherLogger.info('path.trace', {
+        where: 'session.spawn',
+        wsId,
+        recordId: ctx.recordId,
+        agent: adapter.id,
+        wsDir: ws.dir,
+        spawnCwd: ws.dir,
+        envPWD: env['PWD'] ?? null,
+        envHOME: env['HOME'] ?? null,
+        transcriptDir,
+        projectKey: transcriptDir ? basename(transcriptDir) : null,
+        composedCommand,
+        resumeMode: ctx.resume === undefined
+          ? 'fresh'
+          : ctx.resume === 'last' ? 'last' : 'by-id',
+        resumeId: ctx.resume && ctx.resume !== 'last' ? ctx.resume.sessionId : null,
+      });
+
       return {
         opts: {
-          command: adapter.composeCommand(config.command, spawnCtx),
+          command: composedCommand,
           cwd: ws.dir,
           env,
           initialCols: 80,
@@ -219,6 +316,7 @@ export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions
     transcriptWatcher,
     resolveAdapter,
     publicMeta,
+    computeSpawnPlan,
     isShuttingDown: () => shuttingDown,
     dispose,
   };

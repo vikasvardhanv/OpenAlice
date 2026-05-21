@@ -1,6 +1,6 @@
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import { watch, type FSWatcher } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import type { CliAdapter } from './cli-adapter.js';
 import type { Logger } from './logger.js';
@@ -131,6 +131,20 @@ export class TranscriptWatcher {
       preexisting: existing.size,
       pending: entry.pending.length,
     });
+    // path.trace — what the watcher is actually watching for THIS session.
+    // Compare watchDir + projectKey against the spawn path.trace; any
+    // divergence means the CLI will write jsonl to a place we're not
+    // watching, and resumeHint will never be populated.
+    this.logger.info('path.trace', {
+      where: 'transcript.watch.register',
+      wsId: session.wsId,
+      recordId: session.recordId,
+      agent: adapter.id,
+      sessionCwd: session.cwd,
+      watchDir: dir,
+      projectKey: basename(dir),
+      watchDirJsonlCount: existing.size,
+    });
   }
 
   /** Called when a session is disposed OR resolved. Closes idle watchers. */
@@ -178,6 +192,13 @@ export class TranscriptWatcher {
       const sessionId = p.adapter.extractSessionId?.(filename);
       if (!sessionId) return;
       p.session.setAgentSessionId(sessionId);
+      this.logger.info('transcript.jsonl.detected', {
+        wsId: p.session.wsId,
+        recordId: p.session.recordId,
+        agent: p.adapter.id,
+        filename,
+        agentSessionId: sessionId,
+      });
       if (this.sessionRegistry) {
         // Fire-and-forget — failed write just means we don't get the
         // resumeHint persisted, which downgrades resume to `--continue`

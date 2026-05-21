@@ -16,7 +16,7 @@ import { listDir, PathTraversal, readWorkspaceFile, writeWorkspaceFile } from '.
 import { gitLog, gitStatus } from '../../workspaces/git-service.js';
 import { logger as launcherLogger } from '../../workspaces/logger.js';
 import type { SessionRecord } from '../../workspaces/session-registry.js';
-import type { SessionFactoryContext, WorkspaceService } from '../../workspaces/service.js';
+import { resumeFromRecord, type SessionFactoryContext, type WorkspaceService } from '../../workspaces/service.js';
 
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -371,12 +371,27 @@ export function createWorkspaceRoutes(svc: WorkspaceService): Hono {
         message: `record references unknown adapter: ${record.agent}`,
       }, 500);
     }
-    let resume: SessionFactoryContext['resume'];
-    if (record.resumeHint && adapter.capabilities.resumeById) {
-      resume = { sessionId: record.resumeHint.value };
-    } else if (adapter.capabilities.resumeLast) {
-      resume = 'last';
-    }
+    const resume = resumeFromRecord(record, adapter);
+    const plan = svc.computeSpawnPlan(meta, adapter, resume);
+    // path.trace at the moment the resume decision is taken — captures what
+    // we're ABOUT to do, before bootstrap or spawn. If a downstream step
+    // diverges (e.g. claude CLI writes jsonl to a different projectKey),
+    // we compare this against the transcript.watch.register trace.
+    launcherLogger.info('path.trace', {
+      where: 'resume.attempt',
+      wsId: id,
+      recordId: token,
+      agent: adapter.id,
+      wsDir: meta.dir,
+      spawnCwd: plan.spawnCwd,
+      envPWD: plan.envPWD,
+      transcriptDir: plan.transcriptDir,
+      projectKey: plan.projectKey,
+      composedCommand: plan.composedCommand,
+      resumeMode: plan.resumeMode,
+      resumeId: plan.resumeId,
+      resumeHintInRecord: record.resumeHint ?? null,
+    });
     try {
       if (adapter.bootstrap) {
         await adapter.bootstrap({
@@ -433,6 +448,100 @@ export function createWorkspaceRoutes(svc: WorkspaceService): Hono {
       launcherLogger.error('workspace.session_resume_failed', { id, token, err });
       return c.json({ error: 'resume_failed', message: (err as Error).message }, 500);
     }
+  });
+
+  // Read-only introspection for a single session. Returns the full set of
+  // path-related fields a spawn / resume would compute (via the same
+  // `computeSpawnPlan` the pool uses), plus an on-disk snapshot of the
+  // transcript dir the adapter is watching. Lets us curl against a stuck
+  // workspace and immediately see whether the projectKey / cwd / PWD /
+  // transcriptDir / watched dir contents are internally consistent —
+  // without having to spawn or read 50k lines of backend stdout.
+  app.get('/:id/sessions/:sid/diagnostics', async (c) => {
+    const id = c.req.param('id');
+    const token = c.req.param('sid');
+    if (!validId(id) || !SESSION_ID_RE.test(token)) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    const meta = svc.registry.get(id);
+    if (!meta) return c.json({ error: 'workspace_not_found' }, 404);
+    await svc.sessionRegistry.ensureLoaded(id).catch(() => undefined);
+    const record = svc.sessionRegistry.get(id, token);
+    if (!record) return c.json({ error: 'session_not_found' }, 404);
+    const adapter = svc.adapters.get(record.agent);
+    if (!adapter) {
+      return c.json({
+        error: 'unknown_agent',
+        message: `record references unknown adapter: ${record.agent}`,
+      }, 500);
+    }
+
+    const resume = resumeFromRecord(record, adapter);
+    const plan = svc.computeSpawnPlan(meta, adapter, resume);
+
+    let transcriptFiles: { name: string; size: number; mtime: string }[] = [];
+    let transcriptExists = false;
+    if (plan.transcriptDir) {
+      try {
+        const { readdir, stat } = await import('node:fs/promises');
+        const names = await readdir(plan.transcriptDir);
+        transcriptExists = true;
+        const results = await Promise.all(
+          names.map(async (name) => {
+            try {
+              const st = await stat(join(plan.transcriptDir as string, name));
+              return { name, size: st.size, mtime: st.mtime.toISOString() };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        transcriptFiles = results.filter((r): r is { name: string; size: number; mtime: string } => r !== null);
+      } catch {
+        transcriptExists = false;
+      }
+    }
+
+    const liveSessions = svc.pool.liveSessionsFor(id);
+    const live = liveSessions.find((s) => s.id === token) ?? null;
+
+    return c.json({
+      workspace: {
+        id: meta.id,
+        dir: meta.dir,
+        agents: meta.agents,
+      },
+      record: {
+        id: record.id,
+        state: record.state,
+        agent: record.agent,
+        resumeHint: record.resumeHint ?? null,
+        lastActiveAt: record.lastActiveAt,
+        createdAt: record.createdAt,
+      },
+      live: live === null ? null : {
+        pid: live.pid,
+        startedAt: live.startedAt,
+        agentSessionId: live.agentSessionId,
+      },
+      adapter: {
+        id: adapter.id,
+        capabilities: adapter.capabilities,
+      },
+      transcript: {
+        projectKey: plan.projectKey,
+        dir: plan.transcriptDir,
+        exists: transcriptExists,
+        files: transcriptFiles,
+      },
+      wouldResume: {
+        mode: plan.resumeMode,
+        resumeId: plan.resumeId,
+        composedCommand: plan.composedCommand,
+        spawnCwd: plan.spawnCwd,
+        envPWD: plan.envPWD,
+      },
+    });
   });
 
   app.delete('/:id/sessions/:sid', async (c) => {
