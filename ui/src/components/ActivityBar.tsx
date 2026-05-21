@@ -1,4 +1,5 @@
-import { type LucideIcon, MessageSquare, MessagesSquare, Inbox, Bell, LineChart, GitBranch, BarChart3, Newspaper, Zap, Settings, Code2, TerminalSquare, ChevronDown, Plug, Landmark } from 'lucide-react'
+import { type LucideIcon, MessageSquare, MessagesSquare, Inbox, Bell, LineChart, GitBranch, BarChart3, Newspaper, Zap, Settings, Code2, TerminalSquare, ChevronDown, Plug, Landmark, Info } from 'lucide-react'
+import { useState } from 'react'
 import { type Page } from '../App'
 import { useWorkspace } from '../tabs/store'
 import type { ActivitySection, ViewSpec } from '../tabs/types'
@@ -31,6 +32,13 @@ function activitySectionFor(page: Page): ActivitySection {
 interface ActivityBarProps {
   open: boolean
   onClose: () => void
+  /**
+   * Called after the user activates an item. Receives the activity the user
+   * landed on (or null if they collapsed the current one by re-clicking it).
+   * The parent uses this on mobile to drill into the secondary sidebar drawer
+   * instead of dismissing entirely. Desktop layouts can ignore it.
+   */
+  onItemActivated?: (section: ActivitySection | null) => void
 }
 
 // ==================== Nav item definitions ====================
@@ -134,7 +142,7 @@ const NAV_SECTIONS: NavSection[] = [
 // ==================== ActivityBar ====================
 
 /**
- * Linear-style left nav. 220px wide on all viewports; on mobile (<md)
+ * Linear-style left nav. 200px wide on all viewports; on mobile (<md)
  * it slides in over the page from the left, on desktop it's a static
  * column. Top section (no header) is the pinned-nav block — Chat,
  * Inbox, Workspaces, etc. — always visible. Labeled sections (Agent,
@@ -146,7 +154,7 @@ const NAV_SECTIONS: NavSection[] = [
  * lifecycle stages and the section labels are how we'll later
  * communicate that. Mostly-icon view would hide the differentiation.
  */
-export function ActivityBar({ open, onClose }: ActivityBarProps) {
+export function ActivityBar({ open, onClose, onItemActivated }: ActivityBarProps) {
   const selectedSidebar = useWorkspace((state) => state.selectedSidebar)
   const setSidebar = useWorkspace((state) => state.setSidebar)
   const openOrFocus = useWorkspace((state) => state.openOrFocus)
@@ -164,11 +172,11 @@ export function ActivityBar({ open, onClose }: ActivityBarProps) {
         onClick={onClose}
       />
 
-      {/* ActivityBar — 220px on all viewports. Mobile: slide-in over
+      {/* ActivityBar — 200px on all viewports. Mobile: slide-in over
        *  page with backdrop. Desktop: static column flush left. */}
       <aside
         className={`
-          w-[220px] h-full flex flex-col shrink-0
+          w-[200px] h-full flex flex-col shrink-0
           bg-bg-secondary
           border-r border-border
           fixed z-50 top-0 left-0 transition-transform duration-200
@@ -203,32 +211,18 @@ export function ActivityBar({ open, onClose }: ActivityBarProps) {
             return (
               <div key={si} className={si > 0 ? 'mt-4' : ''}>
                 {labeled && (
-                  <button
-                    type="button"
-                    onClick={() => setCollapsed(
+                  <SectionHeader
+                    label={section.sectionLabel}
+                    description={section.description}
+                    isCollapsed={isCollapsed}
+                    onToggleCollapse={() => setCollapsed(
                       section.sectionLabel,
                       !isCollapsed,
                       section.defaultCollapsed,
                     )}
-                    className="w-full flex items-center gap-1.5 px-3 mb-1 py-1 text-[11px] font-medium text-text-muted/60 hover:text-text-muted uppercase tracking-wider transition-colors"
-                    aria-expanded={!isCollapsed}
-                    aria-controls={`activity-section-${si}`}
-                  >
-                    <ChevronDown
-                      size={12}
-                      strokeWidth={2.25}
-                      className={`shrink-0 transition-transform duration-150 ${
-                        isCollapsed ? '-rotate-90' : 'rotate-0'
-                      }`}
-                      aria-hidden
-                    />
-                    <span>{section.sectionLabel}</span>
-                  </button>
-                )}
-                {showItems && section.description && (
-                  <p className="px-3 mb-2 text-[11px] text-text-muted/60 leading-relaxed">
-                    {section.description}
-                  </p>
+                    controlsId={`activity-section-${si}`}
+                    showItems={showItems}
+                  />
                 )}
                 {showItems && (
                   <div className="flex flex-col gap-0.5" id={`activity-section-${si}`}>
@@ -237,12 +231,13 @@ export function ActivityBar({ open, onClose }: ActivityBarProps) {
                       const isActive = selectedSidebar === sec
                       const Icon = item.icon
                       const handleClick = () => {
-                        onClose()
+                        let landedOn: ActivitySection | null
                         if (selectedSidebar === sec) {
                           // Same section re-clicked: toggle sidebar off. Don't
                           // touch the focused tab — collapsing the sidebar
                           // shouldn't change what's in the editor.
                           setSidebar(null)
+                          landedOn = null
                         } else {
                           setSidebar(sec)
                           // Activities with a meaningful default landing (e.g.
@@ -250,7 +245,12 @@ export function ActivityBar({ open, onClose }: ActivityBarProps) {
                           // activities (Chat, Settings, Trading-as-Git, …) leave
                           // tab focus alone — user picks from the sidebar.
                           if (item.defaultTab) openOrFocus(item.defaultTab)
+                          landedOn = sec
                         }
+                        // Let parent decide the mobile transition (drill into
+                        // secondary drawer vs dismiss). Default: just close.
+                        if (onItemActivated) onItemActivated(landedOn)
+                        else onClose()
                       }
                       return (
                         <button
@@ -294,6 +294,81 @@ export function ActivityBar({ open, onClose }: ActivityBarProps) {
         </nav>
 
       </aside>
+    </>
+  )
+}
+
+// ==================== SectionHeader ====================
+
+/**
+ * Section header row: collapse-toggle on the left + optional (i)
+ * disclosure on the right that expands the section's `description`
+ * prose inline below the row, pushing items down.
+ *
+ * Why inline rather than a floating popover: the nav uses
+ * `overflow-y: auto` for scrolling, which clips horizontally-
+ * overflowing absolute children. An inline disclosure sidesteps that
+ * entirely and lets the prose use full sidebar width.
+ *
+ * Hint visibility is component-local state — every fresh mount starts
+ * collapsed. Intentional: the description is reference info, not a
+ * preference worth persisting.
+ */
+function SectionHeader({
+  label,
+  description,
+  isCollapsed,
+  onToggleCollapse,
+  controlsId,
+  showItems,
+}: {
+  label: string
+  description?: string
+  isCollapsed: boolean
+  onToggleCollapse: () => void
+  controlsId: string
+  showItems: boolean
+}) {
+  const [hintOpen, setHintOpen] = useState(false)
+  return (
+    <>
+      <div className="flex items-center px-3 mb-1">
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          className="flex-1 flex items-center gap-1.5 py-1 text-[11px] font-medium text-text-muted/60 hover:text-text-muted uppercase tracking-wider transition-colors text-left"
+          aria-expanded={!isCollapsed}
+          aria-controls={controlsId}
+        >
+          <ChevronDown
+            size={12}
+            strokeWidth={2.25}
+            className={`shrink-0 transition-transform duration-150 ${
+              isCollapsed ? '-rotate-90' : 'rotate-0'
+            }`}
+            aria-hidden
+          />
+          <span>{label}</span>
+        </button>
+        {description && (
+          <button
+            type="button"
+            onClick={() => setHintOpen((o) => !o)}
+            className={`flex items-center justify-center p-0.5 transition-colors ${
+              hintOpen ? 'text-text-muted' : 'text-text-muted/50 hover:text-text-muted'
+            }`}
+            aria-label={`About ${label}`}
+            aria-expanded={hintOpen}
+          >
+            <Info size={11} strokeWidth={2.25} aria-hidden />
+          </button>
+        )}
+      </div>
+      {showItems && description && hintOpen && (
+        <p className="px-3 mb-2 text-[11px] text-text-muted/60 leading-relaxed">
+          {description}
+        </p>
+      )}
     </>
   )
 }

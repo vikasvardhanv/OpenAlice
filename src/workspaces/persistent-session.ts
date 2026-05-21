@@ -82,6 +82,14 @@ export class PersistentSession {
   private _agentSessionId: string | null = null;
   /** Wall-clock spawn time; surfaced via the GET /sessions endpoint for tab ordering. */
   private readonly _startedAt = Date.now();
+  /**
+   * Latched on the FIRST child exit; lets the resume/spawn route find out the
+   * child died (instead of returning 200 OK while the PTY respawn-loops itself
+   * into the circuit breaker behind the user's back). Subsequent exits are
+   * still logged, just not re-broadcast through this hook.
+   */
+  private firstExit: { code: number; signal: number | null } | null = null;
+  private exitWaiters: Set<(info: { code: number; signal: number | null }) => void> = new Set();
 
   constructor(opts: PersistentSessionOptions) {
     this.opts = opts;
@@ -146,6 +154,11 @@ export class PersistentSession {
       code: exitCode,
       signal,
     });
+    if (this.firstExit === null) {
+      this.firstExit = { code: exitCode, signal };
+      for (const w of this.exitWaiters) w(this.firstExit);
+      this.exitWaiters.clear();
+    }
     this.sendControl({
       type: 'lifecycle',
       kind: 'child-exit',
@@ -214,6 +227,31 @@ export class PersistentSession {
 
   get startedAt(): number {
     return this._startedAt;
+  }
+
+  /**
+   * Resolve when the FIRST PTY child exits, or null when `timeoutMs` elapses
+   * with the child still alive. Lets the REST spawn/resume handlers report
+   * "I started a PTY but it died immediately" instead of blindly returning
+   * 200 OK while the respawn loop tips over the circuit breaker.
+   *
+   * If the child already died before this is called, returns the latched
+   * info synchronously (wrapped in a resolved Promise).
+   */
+  waitForFirstExit(timeoutMs: number): Promise<{ code: number; signal: number | null } | null> {
+    if (this.firstExit) return Promise.resolve(this.firstExit);
+    return new Promise((resolve) => {
+      const waiter = (info: { code: number; signal: number | null }): void => {
+        clearTimeout(timer);
+        resolve(info);
+      };
+      const timer = setTimeout(() => {
+        this.exitWaiters.delete(waiter);
+        resolve(null);
+      }, timeoutMs);
+      timer.unref();
+      this.exitWaiters.add(waiter);
+    });
   }
 
   /**

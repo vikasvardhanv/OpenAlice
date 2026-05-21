@@ -9,7 +9,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import { claudeAdapter } from './adapters/claude.js';
 import { codexAdapter } from './adapters/codex.js';
@@ -17,14 +17,32 @@ import { shellAdapter } from './adapters/shell.js';
 import { AdapterRegistry, type CliAdapter } from './cli-adapter.js';
 import { loadConfig, type ServerConfig } from './config.js';
 import { logger as launcherLogger } from './logger.js';
+import { runHeadlessProbe, type HeadlessProbeResult } from './probe.js';
 import { ScrollbackStore } from './scrollback-store.js';
 import { SessionPool, type SessionFactoryContext } from './session-pool.js';
-import { SessionRegistry } from './session-registry.js';
+import { SessionRegistry, type SessionRecord } from './session-registry.js';
 import { buildSpawnEnv } from './spawn-env.js';
 import { TemplateRegistry } from './template-registry.js';
 import { TranscriptWatcher } from './transcript-watcher.js';
 import { WorkspaceCreator } from './workspace-creator.js';
 import { WorkspaceRegistry, type WorkspaceMeta } from './workspace-registry.js';
+
+/**
+ * The fully-resolved spawn plan for a (workspace, adapter, resume-intent)
+ * triple. Computed by the same code path the pool's factory uses, so a
+ * dry-run snapshot (diagnostics endpoint) and a live spawn agree on every
+ * field — including the path-related ones that this whole debugging
+ * scaffold exists to compare.
+ */
+export interface SpawnPlan {
+  readonly resumeMode: 'fresh' | 'last' | 'by-id';
+  readonly resumeId: string | null;
+  readonly composedCommand: readonly string[];
+  readonly spawnCwd: string;
+  readonly envPWD: string | null;
+  readonly transcriptDir: string | null;
+  readonly projectKey: string | null;
+}
 
 export interface WorkspaceService {
   readonly config: ServerConfig;
@@ -38,12 +56,61 @@ export interface WorkspaceService {
   readonly transcriptWatcher: TranscriptWatcher;
   resolveAdapter(meta: WorkspaceMeta, agentId?: string): CliAdapter;
   publicMeta(w: WorkspaceMeta): Promise<unknown>;
+  /**
+   * Compute what a spawn would do, without actually spawning. The same code
+   * path the pool's factory uses internally — dry-run and live can't drift.
+   */
+  computeSpawnPlan(
+    meta: WorkspaceMeta,
+    adapter: CliAdapter,
+    resume: SessionFactoryContext['resume'],
+  ): SpawnPlan;
+  /**
+   * Spawn an off-the-record PTY against the workspace, append a positional
+   * prompt to the adapter's command, kill on timeout, return PTY-output-tail
+   * + transcript-dir jsonl delta. Independent of the pool — never updates
+   * the SessionRegistry, never registers with the transcript watcher, never
+   * affects state visible to other clients. Pure observation tool.
+   */
+  runHeadlessProbe(
+    meta: WorkspaceMeta,
+    adapter: CliAdapter,
+    resume: SessionFactoryContext['resume'],
+    prompt: string,
+    timeoutMs: number,
+  ): Promise<HeadlessProbeResult>;
   isShuttingDown(): boolean;
   dispose(reason: string): Promise<void>;
 }
 
-export async function createWorkspaceService(): Promise<WorkspaceService> {
-  const config = loadConfig();
+export interface CreateWorkspaceServiceOptions {
+  /** Backend's bound web port — used to derive the CORS allowlist. */
+  readonly webPort: number;
+  /** Backend's bound MCP port — injected as `OPENALICE_MCP_URL` into each
+   *  PTY's env so workspace `mcp.json` templates' `${OPENALICE_MCP_URL:-...}`
+   *  fallback bridge resolves to the live backend (not whatever was the
+   *  default in template files). */
+  readonly mcpPort: number;
+}
+
+/**
+ * Pick a resume intent from a persisted record + the adapter's capabilities.
+ * Mirrors the logic the resume route used to inline (now consumed by both
+ * the resume route and the diagnostics endpoint).
+ */
+export function resumeFromRecord(
+  record: SessionRecord,
+  adapter: CliAdapter,
+): SessionFactoryContext['resume'] {
+  if (record.resumeHint && adapter.capabilities.resumeById) {
+    return { sessionId: record.resumeHint.value };
+  }
+  if (adapter.capabilities.resumeLast) return 'last';
+  return undefined;
+}
+
+export async function createWorkspaceService(opts: CreateWorkspaceServiceOptions): Promise<WorkspaceService> {
+  const config = loadConfig({ webPort: opts.webPort });
 
   const registry = await WorkspaceRegistry.load(
     `${config.launcherRoot}/workspaces.json`,
@@ -113,28 +180,119 @@ export async function createWorkspaceService(): Promise<WorkspaceService> {
     return adapters.resolve(null);
   };
 
+  /**
+   * Single source of truth for "given a workspace + adapter + resume intent,
+   * what argv / cwd / env / transcriptDir would a spawn use?" Consumed by:
+   *   - the pool's factory (live PTY spawn)
+   *   - `computeSpawnPlan` (public-facing dry-run for diagnostics)
+   *   - the headless probe (offline spawn that appends a positional prompt)
+   *
+   * Keeps the three call sites byte-identical on every env / command field.
+   */
+  const composeSpawnInputs = (
+    ws: WorkspaceMeta,
+    adapter: CliAdapter,
+    resume: SessionFactoryContext['resume'],
+  ): {
+    command: readonly string[];
+    cwd: string;
+    env: Record<string, string>;
+    transcriptDir: string | null;
+  } => {
+    const baseEnv = buildSpawnEnv(process.env, {
+      AQ_WS_ID: ws.id,
+      AQ_LAUNCHER_REPO_ROOT: config.launcherRepoRoot,
+      // Tells workspace templates' `${OPENALICE_MCP_URL:-...}` substitution
+      // where to find the backend's MCP endpoint at spawn time. Without
+      // this, Claude Code / Codex inside the workspace would fall back to
+      // the template-default port literal which may not match the actual
+      // backend (guardian can pick a different port if the default is taken).
+      OPENALICE_MCP_URL: `http://127.0.0.1:${opts.mcpPort}/mcp`,
+    }, ws.dir);
+    const spawnCtx = {
+      ...(resume !== undefined ? { resume } : {}),
+      cwd: ws.dir,
+      env: baseEnv,
+    };
+    // Adapter-contributed env (e.g. codex sets CODEX_HOME=<cwd>/.codex so
+    // the CLI reads workspace-local config). Merged AFTER baseEnv so the
+    // adapter wins on key collisions.
+    const adapterEnv = adapter.composeEnv?.(spawnCtx) ?? {};
+    const env = { ...baseEnv, ...adapterEnv };
+    const command = adapter.composeCommand(config.command, spawnCtx);
+    const transcriptDir = adapter.transcriptDir ? adapter.transcriptDir(ws.dir) : null;
+    return { command, cwd: ws.dir, env, transcriptDir };
+  };
+
+  const computeSpawnPlan = (
+    ws: WorkspaceMeta,
+    adapter: CliAdapter,
+    resume: SessionFactoryContext['resume'],
+  ): SpawnPlan => {
+    const { command, cwd, env, transcriptDir } = composeSpawnInputs(ws, adapter, resume);
+    return {
+      resumeMode: resume === undefined ? 'fresh' : resume === 'last' ? 'last' : 'by-id',
+      resumeId: resume && resume !== 'last' ? resume.sessionId : null,
+      composedCommand: command,
+      spawnCwd: cwd,
+      envPWD: env['PWD'] ?? null,
+      transcriptDir,
+      projectKey: transcriptDir ? basename(transcriptDir) : null,
+    };
+  };
+
+  const runHeadlessProbeMethod = async (
+    ws: WorkspaceMeta,
+    adapter: CliAdapter,
+    resume: SessionFactoryContext['resume'],
+    prompt: string,
+    timeoutMs: number,
+  ): Promise<HeadlessProbeResult> => {
+    const { command, cwd, env, transcriptDir } = composeSpawnInputs(ws, adapter, resume);
+    return runHeadlessProbe({
+      command,
+      cwd,
+      env,
+      transcriptDir,
+      transcriptFileRe: adapter.transcriptFileRe ?? null,
+      prompt,
+      timeoutMs,
+      logger: launcherLogger.child({ scope: 'probe', wsId: ws.id, agent: adapter.id }),
+    });
+  };
+
   const pool = new SessionPool(
     (wsId, ctx) => {
       const ws = registry.get(wsId);
       if (!ws) throw new Error(`workspace not found: ${wsId}`);
       const adapter = resolveAdapter(ws, ctx.agentId);
-      const baseEnv = buildSpawnEnv(process.env, {
-        AQ_WS_ID: wsId,
-        AQ_LAUNCHER_REPO_ROOT: config.launcherRepoRoot,
+      const { command: composedCommand, env, transcriptDir } = composeSpawnInputs(ws, adapter, ctx.resume);
+
+      // path.trace — single line capturing every path the spawn touches. The
+      // raison d'être of the workspace-sessions.log file: any two fields that
+      // should be equal but aren't are the bug, eyeball-comparable. Keep this
+      // verbose; the file is grep-only, not human-tailed.
+      launcherLogger.info('path.trace', {
+        where: 'session.spawn',
+        wsId,
+        recordId: ctx.recordId,
+        agent: adapter.id,
+        wsDir: ws.dir,
+        spawnCwd: ws.dir,
+        envPWD: env['PWD'] ?? null,
+        envHOME: env['HOME'] ?? null,
+        transcriptDir,
+        projectKey: transcriptDir ? basename(transcriptDir) : null,
+        composedCommand,
+        resumeMode: ctx.resume === undefined
+          ? 'fresh'
+          : ctx.resume === 'last' ? 'last' : 'by-id',
+        resumeId: ctx.resume && ctx.resume !== 'last' ? ctx.resume.sessionId : null,
       });
-      const spawnCtx = {
-        ...(ctx.resume !== undefined ? { resume: ctx.resume } : {}),
-        cwd: ws.dir,
-        env: baseEnv,
-      };
-      // Adapter-contributed env (e.g. codex sets CODEX_HOME=<cwd>/.codex so
-      // the CLI reads workspace-local config). Merged AFTER baseEnv so the
-      // adapter wins on key collisions.
-      const adapterEnv = adapter.composeEnv?.(spawnCtx) ?? {};
-      const env = { ...baseEnv, ...adapterEnv };
+
       return {
         opts: {
-          command: adapter.composeCommand(config.command, spawnCtx),
+          command: composedCommand,
           cwd: ws.dir,
           env,
           initialCols: 80,
@@ -203,6 +361,8 @@ export async function createWorkspaceService(): Promise<WorkspaceService> {
     transcriptWatcher,
     resolveAdapter,
     publicMeta,
+    computeSpawnPlan,
+    runHeadlessProbe: runHeadlessProbeMethod,
     isShuttingDown: () => shuttingDown,
     dispose,
   };

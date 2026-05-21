@@ -1,7 +1,15 @@
 /**
- * Tiny structured logger. One JSON line per log record on stdout, errors on stderr.
- * Keep it hand-rolled so we don't pull in a dep just for boot-time noise.
+ * Tiny structured logger. One JSON line per log record on stdout (errors on
+ * stderr), with an additional append-only file sink at
+ * `logs/workspace-sessions.log` so every spawn / resume / transcript event is
+ * grep-able in isolation without scrolling past every other backend log line.
+ *
+ * Hand-rolled — keep the dep surface zero. The file sink failure must never
+ * take down session lifecycle, so all fs errors are swallowed.
  */
+
+import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
@@ -9,6 +17,20 @@ const LEVELS: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40
 
 const envLevel = (process.env['WEB_TERMINAL_LOG_LEVEL'] ?? 'info').toLowerCase();
 const minLevel: number = LEVELS[envLevel as Level] ?? LEVELS.info;
+
+const FILE_PATH = resolve(process.cwd(), 'logs', 'workspace-sessions.log');
+const fileStream = openFileSink(FILE_PATH);
+
+function openFileSink(path: string): WriteStream | null {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const s = createWriteStream(path, { flags: 'a' });
+    s.on('error', () => { /* swallow — never take down spawn lifecycle */ });
+    return s;
+  } catch {
+    return null;
+  }
+}
 
 function emit(level: Level, msg: string, fields: Record<string, unknown>): void {
   if (LEVELS[level] < minLevel) return;
@@ -18,11 +40,14 @@ function emit(level: Level, msg: string, fields: Record<string, unknown>): void 
     msg,
     ...fields,
   };
-  const line = JSON.stringify(record, replacer);
+  const line = JSON.stringify(record, replacer) + '\n';
   if (level === 'error' || level === 'warn') {
-    process.stderr.write(line + '\n');
+    process.stderr.write(line);
   } else {
-    process.stdout.write(line + '\n');
+    process.stdout.write(line);
+  }
+  if (fileStream) {
+    try { fileStream.write(line); } catch { /* swallow */ }
   }
 }
 

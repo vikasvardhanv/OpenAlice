@@ -26,8 +26,9 @@ export function UrlAdopter() {
   return (
     <>
       <Routes>
-        {/* Root → default chat */}
-        <Route path="/" element={<Navigate to="/chat" replace />} />
+        {/* Root → Inbox (Traditional Chat is legacy; Inbox is the
+            workspace-anchored landing now). */}
+        <Route path="/" element={<Navigate to="/inbox" replace />} />
 
         {/* Activities */}
         <Route path="/chat" element={<AdoptStatic spec={{ kind: 'chat', params: { channelId: 'default' } }} />} />
@@ -81,8 +82,8 @@ export function UrlAdopter() {
         <Route path="/tools" element={<Navigate to="/settings" replace />} />
         <Route path="/uta/:id" element={<RedirectUtaDetail />} />
 
-        {/* Unknown URL → default chat */}
-        <Route path="*" element={<Navigate to="/chat" replace />} />
+        {/* Unknown URL → Inbox */}
+        <Route path="*" element={<Navigate to="/inbox" replace />} />
       </Routes>
       <UrlSync />
     </>

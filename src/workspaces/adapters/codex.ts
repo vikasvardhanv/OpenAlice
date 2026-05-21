@@ -44,7 +44,6 @@ import type { BootstrapContext, CliAdapter, SpawnContext } from '../cli-adapter.
  * discovery, but driven via codex's CLI override flag since codex has no
  * cwd-MCP convention of its own.
  */
-const OPENALICE_MCP_URL_DEFAULT = 'http://127.0.0.1:3001/mcp';
 
 export const codexAdapter: CliAdapter = {
   id: 'codex',
@@ -65,7 +64,17 @@ export const codexAdapter: CliAdapter = {
    * default and override modes.
    */
   composeCommand(_base: readonly string[], ctx: SpawnContext): readonly string[] {
-    const mcpUrl = process.env['OPENALICE_MCP_URL'] ?? OPENALICE_MCP_URL_DEFAULT;
+    // Read from the spawn-bound env (which service.ts populates with the
+    // backend's actual MCP port), NOT from process.env. The backend's own
+    // env only carries OPENALICE_MCP_PORT (set by the dev orchestrator);
+    // OPENALICE_MCP_URL is composed per-spawn and injected via buildSpawnEnv.
+    // Reading process.env here used to fall back to the historical 3001
+    // hardcode and route codex at a port nothing listens on — visible in
+    // path.trace as `composedCommand: [..., 'http://127.0.0.1:3001/mcp']`.
+    const mcpUrl = ctx.env['OPENALICE_MCP_URL'];
+    if (!mcpUrl) {
+      throw new Error('codex adapter: OPENALICE_MCP_URL missing from spawn env');
+    }
     const head = ['codex', '-c', `mcp_servers.openalice.url="${mcpUrl}"`];
     if (ctx.resume === undefined) return head;
     if (ctx.resume === 'last') return [...head, 'resume', '--last'];

@@ -1,23 +1,67 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+/**
+ * Resolve the backend port Vite should proxy /api/* to. Two source paths:
+ *
+ *   1. `OPENALICE_BACKEND_PORT` env — set by `scripts/dev.ts` orchestrator
+ *      when invoked via `pnpm dev`. Guaranteed to match the port the
+ *      backend was spawned on; drift-free.
+ *
+ *   2. `data/config/connectors.json` web.port — used when Vite is run
+ *      standalone (`pnpm dev:ui`), without orchestrator. Stale only if
+ *      the user manually started backend on a different port than
+ *      configured, in which case the standalone workflow is on them.
+ *
+ * Default 3002 if both sources unusable, with a clear warning.
+ */
+function readBackendPort(): number {
+  // Env wins — set by the dev orchestrator. No drift with backend.
+  const envPort = Number.parseInt(process.env['OPENALICE_BACKEND_PORT'] ?? '', 10)
+  if (Number.isFinite(envPort) && envPort > 0 && envPort <= 65535) return envPort
+
+  // Fallback: read the same file backend reads.
+  const configPath = resolve(__dirname, '..', 'data', 'config', 'connectors.json')
+  try {
+    const raw = readFileSync(configPath, 'utf-8')
+    const parsed = JSON.parse(raw) as { web?: { port?: number } }
+    const port = parsed.web?.port
+    if (typeof port === 'number' && port > 0 && port <= 65535) return port
+    console.warn(`[vite] ${configPath}: web.port missing or invalid, falling back to 3002`)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`[vite] could not read ${configPath} (${msg}), falling back to 3002`)
+  }
+  return 3002
+}
+
+const backendPort = readBackendPort()
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  // Dev server on port 5173 with API proxy to the backend (port 3002).
-  // Use this during development for hot reload. See README for details.
+  // Dev server on port 5173 with API proxy to the backend.
+  // Backend port is read from `data/config/connectors.json` (web.port) so
+  // changing the backend port in one place propagates to Vite automatically.
   server: {
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:3002',
+        target: `http://localhost:${backendPort}`,
         // WS upgrade forwarding — required for /api/workspaces/pty.
         ws: true,
       },
     },
   },
   build: {
-    outDir: '../dist/ui',
+    // Output lives inside the package (was '../dist/ui' — a leftover from
+    // when the UI was bolted on as an afterthought to a Telegram-only
+    // engine; cf. memory: linear-vscode-hybrid). Keeping the output inside
+    // ui/ lets turbo's default `outputs: ['dist/**']` track it correctly
+    // and eliminates the "rm -rf dist → dist/ui never rebuilds" footgun.
+    outDir: 'dist',
     emptyOutDir: true,
   },
 })

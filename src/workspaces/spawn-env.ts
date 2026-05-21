@@ -36,6 +36,7 @@ const SELF_VERSION = '0.1.0';
 export function buildSpawnEnv(
   parent: NodeJS.ProcessEnv,
   extras: { [key: string]: string } = {},
+  cwd?: string,
 ): { [key: string]: string } {
   const out: { [key: string]: string } = {};
   for (const [k, v] of Object.entries(parent)) {
@@ -48,6 +49,17 @@ export function buildSpawnEnv(
   out['COLORTERM'] = 'truecolor';
   out['TERM_PROGRAM'] = 'openalice-workspaces';
   out['TERM_PROGRAM_VERSION'] = SELF_VERSION;
+  // Override PWD to match the spawn cwd. PTY spawn does chdir() to `cwd`,
+  // but env PWD is just the parent's PWD passed verbatim. Claude Code CLI
+  // selects its `~/.claude/projects/<projectKey>/` from $PWD (not from
+  // process.cwd()), so without this override claude writes the workspace's
+  // session jsonl into the backend's projectKey — mixing it with whatever
+  // happens to be running there. On resume, `--continue` looks in the
+  // workspace's own projectKey, finds it empty, and exits 1 → PTY respawn
+  // loop into the circuit breaker. Verified end-to-end against the
+  // `path.trace` log: pre-fix `envPWD` was the OpenAlice repo root while
+  // `spawnCwd` was the workspace dir.
+  if (cwd) out['PWD'] = cwd;
   // Caller-supplied per-session env (e.g. AQ_WS_ID, AQ_LAUNCHER_REPO_ROOT)
   // wins over the inherited env so .mcp.json `${VAR}` expansion at Claude
   // startup resolves to the right values.

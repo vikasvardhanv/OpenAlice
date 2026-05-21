@@ -39,19 +39,31 @@ export class TelegramPlugin implements Plugin {
 
   /** Throttle: last time we sent an auth-guidance reply per chatId. */
   private authReplyThrottle = new Map<number, number>()
-  private webPort = 3002
+  /**
+   * Effective web port — provided at construction by `main.ts` /
+   * `reconnectConnectors()` after env-override resolution. Used to build
+   * the auth-guidance URL shown to unauthorized chats. No hardcoded
+   * default: a port-zero or out-of-range value here is a wiring bug, not
+   * a graceful fallback (per Layer 2/3 separation — plugins do not read
+   * config files themselves).
+   */
+  private readonly webPort: number
 
   constructor(
-    config: Omit<TelegramConfig, 'pollingTimeout'> & { pollingTimeout?: number },
+    config: Omit<TelegramConfig, 'pollingTimeout'> & {
+      pollingTimeout?: number;
+      webPort: number;
+    },
     agentSdkConfig: AgentSdkConfig = {},
   ) {
-    this.config = { pollingTimeout: 30, ...config }
+    const { webPort, ...telegramConfig } = config
+    this.config = { pollingTimeout: 30, ...telegramConfig }
     this.agentSdkConfig = agentSdkConfig
+    this.webPort = webPort
   }
 
   async start(engineCtx: EngineContext) {
     this.connectorCenter = engineCtx.connectorCenter
-    this.webPort = engineCtx.config.connectors.web.port
 
     // Inject agent config into Claude Code config (used by /compact command)
     this.agentSdkConfig = {

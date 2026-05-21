@@ -27,6 +27,21 @@ the item when done — git log is the history.
       a workspace can call OpenAlice". Future template authors need to
       know what shape to ship.
 
+- [ ] Retire the `mcp-ask` connector (`src/connectors/mcp-ask/`). It
+      exposed Alice's conversation as an MCP endpoint so external agents
+      could "ask Alice as an agent". The new Workspace architecture
+      gives external agents a richer interaction surface (a real PTY
+      session with file-system access + the full MCP tool catalog),
+      making the ask-Alice-over-MCP shape redundant. Default config has
+      `mcpAsk.enabled: false` so nobody is depending on it in practice.
+      Delete: `src/connectors/mcp-ask/`, related schema in
+      `src/core/config.ts` (`connectorsSchema.mcpAsk`), the two `McpAsk`
+      wiring sites in `src/main.ts` (initial spawn + reconnect path).
+      Also resolves the Node 22-only `fs/promises.glob` usage in
+      `mcp-ask-plugin.ts:82` that would otherwise leak into runtime
+      requirements (the only currently-flagged Node 22 API in OpenAlice
+      backend code).
+
 ## Security
 
 - [ ] Broader API security audit. Only `/api/events/ingest` has auth
@@ -53,6 +68,20 @@ the item when done — git log is the history.
       which event types they're allowed to inject.
 
 ## Architecture
+
+- [ ] Consolidate vitest config structure. Currently 3 entry points
+      (`vitest.config.ts` for unit, `vitest.e2e.config.ts` for broker
+      e2e, `vitest.bbProvider.config.ts` for market-data integration)
+      each maintain their own `workspaceAliases` block — when the main
+      config switched to alias-based workspace resolution (commit
+      36468fc), the other two had to be patched separately (a95969b)
+      to fix the resulting bug. Plan: fold `*.bbProvider.spec.ts` into
+      the e2e config (same "real API + credentials + slow" shape, no
+      real reason for separation), drop `vitest.bbProvider.config.ts`,
+      drop `test:bbProvider` script, remove the `**/*.bbProvider.spec.*`
+      exclude from main config. End state: 2 configs, single
+      workspaceAliases definition shared (perhaps via a small helper
+      module imported by both).
 
 - [ ] `OrderRequest` discriminated union — long-term followup to the
       2026-05-14 OrderHelper boundary fix. Idea: introduce a domain-level

@@ -3,13 +3,14 @@ import { readFile, writeFile, mkdir, unlink, rm } from 'fs/promises'
 import { resolve } from 'path'
 import { newsCollectorSchema } from '../domain/news/config.js'
 import { runMigrations } from '../migrations/runner.js'
+import { dataPath } from '@/core/paths.js'
 import {
   inferVendor as inferVendorFromProfile,
   inferAuthType as inferAuthTypeFromProfile,
   hasExtractableCredential,
 } from './credential-inference.js'
 
-const CONFIG_DIR = resolve('data/config')
+const CONFIG_DIR = dataPath('config')
 
 // ==================== Individual Schemas ====================
 
@@ -410,7 +411,7 @@ export async function loadConfig(): Promise<Config> {
   const files = ['engine.json', 'agent.json', 'crypto.json', 'securities.json', 'market-data.json', 'compaction.json', 'ai-provider-manager.json', 'heartbeat.json', 'snapshot.json', 'mcp.json', 'connectors.json', 'news.json', 'tools.json', 'webhook.json'] as const
   const raws = await Promise.all(files.map((f) => loadJsonFile(f)))
 
-  return {
+  const config: Config = {
     engine:        await parseAndSeed(files[0], engineSchema, raws[0]),
     agent:         await parseAndSeed(files[1], agentSchema, raws[1]),
     crypto:        await parseAndSeed(files[2], cryptoSchema, raws[2]),
@@ -426,6 +427,27 @@ export async function loadConfig(): Promise<Config> {
     tools:         await parseAndSeed(files[12], toolsSchema, raws[12]),
     webhook:       await parseAndSeed(files[13], webhookSchema, raws[13]),
   }
+
+  // Spawn-time-fixed channel: when guardian (Electron main) spawns the
+  // backend, it injects the chosen ports as env. Env wins over the file
+  // value because the file is user preference but the actual bound port
+  // is decided by guardian at boot (may differ if the preferred port was
+  // taken). In dev mode (no guardian) both env vars are unset and the
+  // file value flows through unchanged.
+  const envWebPort = parseEnvPort(process.env['OPENALICE_WEB_PORT'])
+  if (envWebPort !== null) config.connectors.web.port = envWebPort
+  const envMcpPort = parseEnvPort(process.env['OPENALICE_MCP_PORT'])
+  if (envMcpPort !== null) config.mcp.port = envMcpPort
+
+  return config
+}
+
+/** Parse a port from env. Returns null if unset, blank, or out of range. */
+function parseEnvPort(raw: string | undefined): number | null {
+  if (raw === undefined || raw === '') return null
+  const n = Number.parseInt(raw, 10)
+  if (!Number.isFinite(n) || n <= 0 || n > 65535) return null
+  return n
 }
 
 // ==================== UTA Config Loader ====================

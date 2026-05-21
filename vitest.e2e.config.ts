@@ -3,14 +3,21 @@ import { resolve, dirname } from 'node:path'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+// Match vitest.config.ts — workspace packages alias directly to src/*.ts so
+// e2e tests don't need packages/*/dist pre-built.
+const workspaceAliases = {
+  '@': resolve(__dirname, './src'),
+  '@traderalice/ibkr': resolve(__dirname, './packages/ibkr/src/index.ts'),
+  '@traderalice/opentypebb/server': resolve(__dirname, './packages/opentypebb/src/server.ts'),
+  '@traderalice/opentypebb': resolve(__dirname, './packages/opentypebb/src/index.ts'),
+}
+
 // Single process, sequential execution. E2E tests share stateful broker
 // connections (IBKR TCP + clientId, REST API sessions). Module-level
 // singletons in setup.ts require same-process to actually share state.
 export default {
   resolve: {
-    alias: {
-      '@': resolve(__dirname, './src'),
-    },
+    alias: workspaceAliases,
   },
   test: {
     include: ['src/**/*.e2e.spec.*'],

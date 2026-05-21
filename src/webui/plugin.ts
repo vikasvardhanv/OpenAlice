@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { resolve } from 'node:path'
+import { uiBundlePath } from '@/core/paths.js'
 import type { Plugin, EngineContext } from '../core/types.js'
 import type { ProducerHandle } from '../core/producer.js'
 import { SessionStore } from '../core/session.js'
@@ -47,7 +47,12 @@ import { attachWorkspacesWS, type AttachedWS } from './workspaces-ws.js'
 import type { Server as HttpServer } from 'node:http'
 
 export interface WebConfig {
+  /** Effective web port (env-overridden if guardian injected, else from config file). */
   port: number
+  /** Effective MCP port — passed through to workspace service so the
+   *  PTY-injected `OPENALICE_MCP_URL` env points at the live backend
+   *  (not the template-baked default). */
+  mcpPort: number
 }
 
 export class WebPlugin implements Plugin {
@@ -147,7 +152,10 @@ export class WebPlugin implements Plugin {
     // ==================== Workspaces (launcher-style PTY) ====================
     // Self-contained subsystem ported from auto-quant-launcher. Owns its own
     // state under ~/.openalice/workspaces/ and its own /api/workspaces/pty WS.
-    this.workspaceService = await createWorkspaceService()
+    this.workspaceService = await createWorkspaceService({
+      webPort: this.config.port,
+      mcpPort: this.config.mcpPort,
+    })
     if (this.workspaceServiceRef) this.workspaceServiceRef.current = this.workspaceService
     app.route('/api/workspaces', createWorkspaceRoutes(this.workspaceService))
 
@@ -164,7 +172,11 @@ export class WebPlugin implements Plugin {
     })
 
     // ==================== Serve UI (Vite build output) ====================
-    const uiRoot = resolve('dist/ui')
+    // UI bundle lives in `ui/dist/` (the UI package's own dist), not
+    // `dist/ui/` — see ui/vite.config.ts for why (history: UI was added
+    // after engine-only era and got an awkward `../dist/ui` outDir; now
+    // that UI is first-class, the output lives in its own package).
+    const uiRoot = uiBundlePath()
     app.use('/*', serveStatic({ root: uiRoot }))
     app.get('*', serveStatic({ root: uiRoot, path: 'index.html' }))
 

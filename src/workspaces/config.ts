@@ -1,10 +1,8 @@
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
+import { templatesPath } from '@/core/paths.js';
 
 export interface ServerConfig {
-  readonly host: string;
-  readonly port: number;
   readonly command: readonly string[];
   readonly allowedOrigins: ReadonlySet<string>;
   readonly allowAnyOrigin: boolean;
@@ -34,28 +32,50 @@ export interface ServerConfig {
   readonly launcherRepoRoot: string;
 }
 
-const DEFAULT_PORT = 8787;
-const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_HIGH_WM = 1 * 1024 * 1024;
 const DEFAULT_LOW_WM = 256 * 1024;
 const DEFAULT_SHUTDOWN_MS = 5_000;
 const DEFAULT_REPLAY_BYTES = 512 * 1024;
 const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 60_000;
 
-const DEFAULT_ORIGINS = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'http://localhost:3002',
-  'http://127.0.0.1:3002',
-];
+/**
+ * Build the CORS allowlist for the workspace WS upgrade. Derived from the
+ * backend's actual bound web port (not from a hardcoded literal), so the
+ * three valid client topologies are explicitly represented:
+ *
+ *   - `localhost:<webPort>` / `127.0.0.1:<webPort>` — self-hosted: the
+ *     backend serves the UI bundle at the same origin, browser hits it
+ *     directly. Same-origin in practice but Origin header is still set
+ *     and CORS check fires.
+ *   - `localhost:5173` / `127.0.0.1:5173` — contributor-dev: Vite dev
+ *     server proxies API/WS to the backend; browser's origin is 5173.
+ *
+ * The cloud-demo topology (future https://app.openalice.io) is intentionally
+ * NOT in the default list — that's an opt-in addition driven by config when
+ * the cloud demo ships.
+ */
+export function buildDefaultOrigins(webPort: number): string[] {
+  return [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    `http://localhost:${webPort}`,
+    `http://127.0.0.1:${webPort}`,
+  ];
+}
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
-  const port = parseIntEnv(env['PORT'], DEFAULT_PORT, 1, 65535);
-  const host = env['HOST'] ?? DEFAULT_HOST;
+export interface LoadConfigOptions {
+  /** Backend's actual bound web port; used to derive the CORS allowlist. */
+  readonly webPort: number;
+  /** Process env (defaults to `process.env`). */
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+export function loadConfig(opts: LoadConfigOptions): ServerConfig {
+  const env = opts.env ?? process.env;
 
   const command = parseCommand(env['WEB_TERMINAL_COMMAND']);
 
-  const originsRaw = (env['WEB_TERMINAL_ALLOWED_ORIGINS'] ?? DEFAULT_ORIGINS.join(','))
+  const originsRaw = (env['WEB_TERMINAL_ALLOWED_ORIGINS'] ?? buildDefaultOrigins(opts.webPort).join(','))
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
@@ -80,7 +100,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const launcherRoot = resolve(
     env['AQ_LAUNCHER_ROOT'] ?? join(homedir(), '.openalice', 'workspaces'),
   );
-  const templatesDir = resolve(env['AQ_TEMPLATES_DIR'] ?? defaultTemplatesDir());
+  const templatesDir = resolve(env['AQ_TEMPLATES_DIR'] ?? templatesPath());
   const legacyBootstrapScript = env['AQ_BOOTSTRAP_SCRIPT']
     ? resolve(env['AQ_BOOTSTRAP_SCRIPT'])
     : null;
@@ -94,8 +114,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const launcherRepoRoot = computeLauncherRepoRoot();
 
   return {
-    host,
-    port,
     command,
     allowedOrigins,
     allowAnyOrigin,
@@ -142,12 +160,6 @@ function parseIntEnv(raw: string | undefined, fallback: number, lo: number, hi: 
   if (n < lo) return lo;
   if (n > hi) return hi;
   return n;
-}
-
-function defaultTemplatesDir(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  // src/workspaces/config.ts → ./templates/
-  return join(here, 'templates');
 }
 
 /**

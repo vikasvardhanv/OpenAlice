@@ -16,7 +16,7 @@ import { listDir, PathTraversal, readWorkspaceFile, writeWorkspaceFile } from '.
 import { gitLog, gitStatus } from '../../workspaces/git-service.js';
 import { logger as launcherLogger } from '../../workspaces/logger.js';
 import type { SessionRecord } from '../../workspaces/session-registry.js';
-import type { SessionFactoryContext, WorkspaceService } from '../../workspaces/service.js';
+import { resumeFromRecord, type SessionFactoryContext, type WorkspaceService } from '../../workspaces/service.js';
 
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -371,12 +371,27 @@ export function createWorkspaceRoutes(svc: WorkspaceService): Hono {
         message: `record references unknown adapter: ${record.agent}`,
       }, 500);
     }
-    let resume: SessionFactoryContext['resume'];
-    if (record.resumeHint && adapter.capabilities.resumeById) {
-      resume = { sessionId: record.resumeHint.value };
-    } else if (adapter.capabilities.resumeLast) {
-      resume = 'last';
-    }
+    const resume = resumeFromRecord(record, adapter);
+    const plan = svc.computeSpawnPlan(meta, adapter, resume);
+    // path.trace at the moment the resume decision is taken — captures what
+    // we're ABOUT to do, before bootstrap or spawn. If a downstream step
+    // diverges (e.g. claude CLI writes jsonl to a different projectKey),
+    // we compare this against the transcript.watch.register trace.
+    launcherLogger.info('path.trace', {
+      where: 'resume.attempt',
+      wsId: id,
+      recordId: token,
+      agent: adapter.id,
+      wsDir: meta.dir,
+      spawnCwd: plan.spawnCwd,
+      envPWD: plan.envPWD,
+      transcriptDir: plan.transcriptDir,
+      projectKey: plan.projectKey,
+      composedCommand: plan.composedCommand,
+      resumeMode: plan.resumeMode,
+      resumeId: plan.resumeId,
+      resumeHintInRecord: record.resumeHint ?? null,
+    });
     try {
       if (adapter.bootstrap) {
         await adapter.bootstrap({
@@ -402,6 +417,31 @@ export function createWorkspaceRoutes(svc: WorkspaceService): Hono {
         ...(initialReplayBytes ? { initialReplayBytes } : {}),
       };
       const session = svc.pool.spawn(id, ctx);
+      // Give the child a brief window to prove it stays up. If it exits
+      // within ~800ms (claude --continue against a stale projectKey, broken
+      // .mcp.json, missing trust, etc.) we'd otherwise return 200 OK while
+      // the pool respawn-loops itself into a circuit breaker behind the
+      // user's back. Surface the failure so the caller knows resume failed.
+      const earlyExit = await session.waitForFirstExit(800);
+      if (earlyExit) {
+        svc.pool.disposeToken(token, 'resume_early_exit');
+        await svc.sessionRegistry
+          .update(id, token, { state: 'paused', lastActiveAt: new Date().toISOString() })
+          .catch(() => undefined);
+        launcherLogger.warn('workspace.session_resume_early_exit', {
+          id,
+          sessionId: token,
+          agent: adapter.id,
+          code: earlyExit.code,
+          signal: earlyExit.signal,
+        });
+        return c.json({
+          error: 'spawn_died',
+          message: `agent exited within startup window (code=${earlyExit.code})`,
+          exitCode: earlyExit.code,
+          signal: earlyExit.signal,
+        }, 500);
+      }
       if (record.scrollbackFile) {
         await svc.scrollbackStore.remove(record.scrollbackFile);
         delete (record as { scrollbackFile?: string }).scrollbackFile;
@@ -432,6 +472,187 @@ export function createWorkspaceRoutes(svc: WorkspaceService): Hono {
     } catch (err) {
       launcherLogger.error('workspace.session_resume_failed', { id, token, err });
       return c.json({ error: 'resume_failed', message: (err as Error).message }, 500);
+    }
+  });
+
+  // Read-only introspection for a single session. Returns the full set of
+  // path-related fields a spawn / resume would compute (via the same
+  // `computeSpawnPlan` the pool uses), plus an on-disk snapshot of the
+  // transcript dir the adapter is watching. Lets us curl against a stuck
+  // workspace and immediately see whether the projectKey / cwd / PWD /
+  // transcriptDir / watched dir contents are internally consistent —
+  // without having to spawn or read 50k lines of backend stdout.
+  app.get('/:id/sessions/:sid/diagnostics', async (c) => {
+    const id = c.req.param('id');
+    const token = c.req.param('sid');
+    if (!validId(id) || !SESSION_ID_RE.test(token)) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    const meta = svc.registry.get(id);
+    if (!meta) return c.json({ error: 'workspace_not_found' }, 404);
+    await svc.sessionRegistry.ensureLoaded(id).catch(() => undefined);
+    const record = svc.sessionRegistry.get(id, token);
+    if (!record) return c.json({ error: 'session_not_found' }, 404);
+    const adapter = svc.adapters.get(record.agent);
+    if (!adapter) {
+      return c.json({
+        error: 'unknown_agent',
+        message: `record references unknown adapter: ${record.agent}`,
+      }, 500);
+    }
+
+    const resume = resumeFromRecord(record, adapter);
+    const plan = svc.computeSpawnPlan(meta, adapter, resume);
+
+    let transcriptFiles: { name: string; size: number; mtime: string }[] = [];
+    let transcriptExists = false;
+    if (plan.transcriptDir) {
+      try {
+        const { readdir, stat } = await import('node:fs/promises');
+        const names = await readdir(plan.transcriptDir);
+        transcriptExists = true;
+        const results = await Promise.all(
+          names.map(async (name) => {
+            try {
+              const st = await stat(join(plan.transcriptDir as string, name));
+              return { name, size: st.size, mtime: st.mtime.toISOString() };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        transcriptFiles = results.filter((r): r is { name: string; size: number; mtime: string } => r !== null);
+      } catch {
+        transcriptExists = false;
+      }
+    }
+
+    const liveSessions = svc.pool.liveSessionsFor(id);
+    const live = liveSessions.find((s) => s.id === token) ?? null;
+
+    return c.json({
+      workspace: {
+        id: meta.id,
+        dir: meta.dir,
+        agents: meta.agents,
+      },
+      record: {
+        id: record.id,
+        state: record.state,
+        agent: record.agent,
+        resumeHint: record.resumeHint ?? null,
+        lastActiveAt: record.lastActiveAt,
+        createdAt: record.createdAt,
+      },
+      live: live === null ? null : {
+        pid: live.pid,
+        startedAt: live.startedAt,
+        agentSessionId: live.agentSessionId,
+      },
+      adapter: {
+        id: adapter.id,
+        capabilities: adapter.capabilities,
+      },
+      transcript: {
+        projectKey: plan.projectKey,
+        dir: plan.transcriptDir,
+        exists: transcriptExists,
+        files: transcriptFiles,
+      },
+      wouldResume: {
+        mode: plan.resumeMode,
+        resumeId: plan.resumeId,
+        composedCommand: plan.composedCommand,
+        spawnCwd: plan.spawnCwd,
+        envPWD: plan.envPWD,
+      },
+    });
+  });
+
+  // Headless probe: spawn the adapter's CLI against the workspace with a
+  // positional prompt appended, run in a temporary PTY (no pool, no record
+  // mutation), kill on timeout, return the PTY-output tail + a jsonl-delta
+  // snapshot of the transcript dir. Lets an AI / curl caller verify the
+  // full wiring (PWD, MCP, trust, resume) end-to-end without going through
+  // the UI. Refuses when a live PTY exists for the same record — they'd
+  // collide on the same transcript and the result would be misleading.
+  app.post('/:id/sessions/:sid/probe', async (c) => {
+    const id = c.req.param('id');
+    const token = c.req.param('sid');
+    if (!validId(id) || !SESSION_ID_RE.test(token)) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    let prompt: string;
+    let timeoutMs: number;
+    let resumeOverride: 'none' | 'last' | { sessionId: string } | undefined;
+    try {
+      const body = await safeJson(c);
+      const fields = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+      const rawPrompt = fields['prompt'];
+      if (typeof rawPrompt !== 'string' || rawPrompt.length === 0) {
+        return c.json({ error: 'prompt_required' }, 400);
+      }
+      if (rawPrompt.length > 8000) {
+        return c.json({ error: 'prompt_too_long', message: 'max 8000 chars' }, 400);
+      }
+      prompt = rawPrompt;
+      const rawTimeout = fields['timeoutMs'];
+      timeoutMs = typeof rawTimeout === 'number' && rawTimeout > 0
+        ? Math.min(rawTimeout, 120_000)
+        : 20_000;
+      // resume override: 'auto' (default — follow record's resumeHint),
+      // 'fresh' (no resume flag), 'last' (force --continue), or a UUID
+      // string (force --resume <uuid>). Lets the probe seed a brand-new
+      // session before any real interaction has produced a transcript.
+      const rawResume = fields['resume'];
+      if (rawResume !== undefined && rawResume !== 'auto') {
+        if (rawResume === 'fresh') resumeOverride = 'none';
+        else if (rawResume === 'last') resumeOverride = 'last';
+        else if (typeof rawResume === 'string' && SESSION_ID_RE.test(rawResume)) {
+          resumeOverride = { sessionId: rawResume };
+        } else {
+          return c.json({ error: 'bad_request', message: 'resume must be "auto", "fresh", "last", or a UUID' }, 400);
+        }
+      }
+    } catch (err) {
+      return c.json({ error: 'bad_request', message: (err as Error).message }, 400);
+    }
+    const meta = svc.registry.get(id);
+    if (!meta) return c.json({ error: 'workspace_not_found' }, 404);
+    await svc.sessionRegistry.ensureLoaded(id).catch(() => undefined);
+    const record = svc.sessionRegistry.get(id, token);
+    if (!record) return c.json({ error: 'session_not_found' }, 404);
+    if (svc.pool.get(token)) {
+      return c.json({
+        error: 'session_live',
+        message: 'pause the live PTY before probing — they would race on the transcript',
+      }, 409);
+    }
+    const adapter = svc.adapters.get(record.agent);
+    if (!adapter) {
+      return c.json({
+        error: 'unknown_agent',
+        message: `record references unknown adapter: ${record.agent}`,
+      }, 500);
+    }
+    const resume: SessionFactoryContext['resume'] =
+      resumeOverride === 'none'
+        ? undefined
+        : resumeOverride === 'last'
+          ? 'last'
+          : resumeOverride !== undefined
+            ? resumeOverride
+            : resumeFromRecord(record, adapter);
+    launcherLogger.info('workspace.probe_started', {
+      id, sessionId: token, agent: adapter.id, promptLen: prompt.length, timeoutMs,
+      resumeMode: resume === undefined ? 'fresh' : resume === 'last' ? 'last' : 'by-id',
+    });
+    try {
+      const result = await svc.runHeadlessProbe(meta, adapter, resume, prompt, timeoutMs);
+      return c.json(result);
+    } catch (err) {
+      launcherLogger.error('workspace.probe_failed', { id, token, err });
+      return c.json({ error: 'probe_failed', message: (err as Error).message }, 500);
     }
   });
 

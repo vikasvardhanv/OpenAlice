@@ -7,7 +7,7 @@
     },
     "open-alice-ui#build": {
       "dependsOn": [],
-      "outputs": []
+      "outputs": ["dist/**"]
     }
   }
 }

@@ -187,16 +187,101 @@ Today the connectors are wired to traditional chat. Workspace chat is the recomm
 
 ## Quick Start
 
-Prerequisites: Node.js 22+, pnpm 10+, [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated.
+> **Heads up:** there's no native installer yet. To try OpenAlice today you
+> clone the repo and run it from source — this section is the contributor /
+> early-adopter path. A DMG (macOS) + Windows installer are in flight; once
+> they ship, the steps below collapse to "download, open, done."
+
+### 0. Tools you need
+
+| Tool | Why | Install |
+| --- | --- | --- |
+| **Node.js 22+** | Runs the backend | [nodejs.org](https://nodejs.org/) · `brew install node` · `nvm install 22` |
+| **pnpm 10+** | Workspace package manager | `npm install -g pnpm` · [pnpm.io/installation](https://pnpm.io/installation) |
+| **git** | Clone the repo | Usually already installed. If not: [git-scm.com](https://git-scm.com/) |
+| **Claude Code CLI** | The agent CLI that powers Workspace chats | [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code), then run `claude` once to log in with your Claude Pro/Max subscription. **No API key needed.** |
+
+Windows additionally needs a POSIX shell — see [Windows](#windows) below.
+
+Sanity check:
+
+```bash
+node --version    # v22.x.x
+pnpm --version    # 10.x.x or newer
+claude --version  # 2.x.x (Claude Code 2.x)
+```
+
+### 1. Clone and install dependencies
 
 ```bash
 git clone https://github.com/TraderAlice/OpenAlice.git
 cd OpenAlice
-pnpm install && pnpm build
+pnpm install
+```
+
+First-time `pnpm install` pulls the full monorepo + native deps (notably
+`node-pty` for terminal sessions). On a normal connection allow ~1 minute.
+
+> pnpm may print *"Ignored build scripts: ccxt, esbuild, protobufjs"* — this
+> is fine, those are optional native optimizations and OpenAlice doesn't need
+> them. You can run `pnpm approve-builds` later if you want to opt in.
+
+### 2. Start it
+
+```bash
 pnpm dev
 ```
 
-Open [localhost:3002](http://localhost:3002) and start chatting. No API keys or config needed — the default setup uses your local Claude Code login (Claude Pro/Max subscription).
+The first lines of output are the three URLs the dev orchestrator picked:
+
+```text
+[dev] backend  →  http://localhost:47331
+[dev] MCP      →  http://localhost:47332/mcp
+[dev] UI       →  http://localhost:5173  (Vite picks +1 if taken)
+```
+
+Below that you'll see backend startup logs (brokers connecting, news feeds
+fetching, plugins starting). When you see
+
+```text
+engine: started
+web plugin listening on http://localhost:47331
+```
+
+…the backend is ready.
+
+> You may also see a warning *"serveStatic: root path '.../ui/dist' is not
+> found"* — that's expected in dev mode (the UI is served by Vite on 5173, not
+> by the backend). Ignore it. The warning goes away after `pnpm build` if you
+> ever switch to production mode.
+
+### 3. Open the UI
+
+Open the **UI** URL the terminal printed — by default
+[http://localhost:5173](http://localhost:5173). Don't open the backend port
+(47331) directly in dev mode; that path serves only the pre-built UI bundle,
+which doesn't exist yet on a fresh checkout.
+
+If port 5173 is busy, Vite auto-picks 5174 (or higher) and prints the actual
+URL in the terminal — always trust the terminal output over the number in
+this README.
+
+You should see Alice's sidebar (Inbox / Workspaces / Chat / Market / News).
+Click **Chat** and start typing — no API keys, no config files to edit. The
+default provider routes through your local Claude Code login.
+
+### 4. When things go wrong
+
+| Symptom | Most likely cause + fix |
+| --- | --- |
+| `claude: command not found` during startup | Claude Code CLI isn't installed or isn't on PATH. Revisit Step 0. |
+| Backend logs `Please log in to Claude` | Claude Code session expired. Run `claude` once in any terminal to re-authenticate, then restart `pnpm dev`. |
+| Browser shows *"can't connect"* on 5173 | The backend is still booting. Wait for `engine: started`, then refresh. |
+| Browser loads but everything says *"disconnected"* | The WebSocket can't reach the backend. Check the terminal — backend probably exited; restart `pnpm dev`. |
+| Port 5173 / 47331 already in use | Vite and the orchestrator both auto-bump to the next free port. Read the URL the terminal actually printed, not the number in this README. |
+| `pnpm: command not found` | Run `npm install -g pnpm` to install it globally. |
+
+Still stuck → see [Getting Help](#getting-help).
 
 ### Windows
 

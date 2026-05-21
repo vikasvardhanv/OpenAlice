@@ -26,14 +26,29 @@ export const claudeAdapter: CliAdapter = {
   namePrefix: 'c',
   capabilities: {
     parallelPerCwd: true,
-    resumeLast: true,
+    // `claude --continue` is intentionally NOT supported. It's a fragile
+    // flag whose semantics ("continue most recent in cwd") fails hard when:
+    //   - the projectKey dir is empty (PTY started but user never sent a
+    //     message before pausing — common in practice)
+    //   - multiple jsonl coexist in the dir (claude picks ambiguously and
+    //     bails with "No conversation found to continue")
+    //   - the most-recent session lacks a deferred-tool marker
+    // It's also irrelevant to OpenAlice's model: we already track session
+    // identity at the record layer, so "resume by id" is the only mode
+    // that fits the workbench. Records without a resolved id get a fresh
+    // spawn — better than a respawn loop into the circuit breaker.
+    resumeLast: false,
     resumeById: true,
     transcriptDiscovery: 'fs-watch',
   },
 
   composeCommand(base: readonly string[], ctx: SpawnContext): readonly string[] {
     if (ctx.resume === undefined) return base;
-    if (ctx.resume === 'last') return [...base, '--continue'];
+    if (ctx.resume === 'last') {
+      throw new Error(
+        'claude adapter: "last" resume not supported — use --resume <sessionId> or undefined (fresh)',
+      );
+    }
     return [...base, '--resume', ctx.resume.sessionId];
   },
 
