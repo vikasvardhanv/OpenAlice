@@ -4,6 +4,36 @@ All notable changes to OpenAlice will be documented in this file.
 
 ## [Unreleased]
 
+### 🏗️ Architecture — UTA-split v1
+
+Split the trading domain into a dedicated UTA service co-located with
+Alice. Broker connections, the git-like approval state machine, snapshot
+scheduling, FX, and the broker SDKs (CCXT / Alpaca / Longbridge / IBKR
+TWS port) all live in `services/uta/` now. Alice talks to UTA over
+loopback HTTP through `UTAManagerSDK` + `UTAAccountSDK` — the public
+surface (`ctx.utaManager`, the 19 AI trading tools, `UnifiedTradingAccount`
+method shapes) is preserved, the implementation underneath swapped to
+an HTTP adapter.
+
+Three carriers of the L2 supervisor (Guardian) now share a module:
+`scripts/guardian/{shared.ts, dev.ts, prod.mjs}`. Guardian probes
+ports, spawns UTA + Alice (+ Vite in dev), gates Alice's boot on
+`/__uta/health`, and watches `data/control/restart-uta.flag` for
+config-change-triggered UTA respawns.
+
+Docker image now produces both `dist/main.js` (Alice) and
+`services/uta/dist/uta.js` (UTA), runs them under tini + Guardian.
+
+Shared wire types + the broker preset catalog moved into a new
+`@traderalice/uta-protocol` workspace package. Alice ↔ UTA both depend
+on this; it's the long-term boundary contract if UTA later migrates to
+a separate carrier (mobile / home server / etc).
+
+Not yet shipped: auth gate between Alice and UTA (deliberately deferred
+— v1 binds UTA to 127.0.0.1 and trusts same-host); public-internet
+deployment + admin-token session cookie path; physical UTA migration
+off the Alice host.
+
 ### Config
 
 - Default crypto to bybit demo, securities to alpaca paper with tickers

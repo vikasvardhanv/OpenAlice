@@ -7,6 +7,41 @@ once handled.
 Format: `- [ ] <area>: <item> — <short why/context>`. Keep the why, drop
 the item when done — git log is the history.
 
+## UTA split — v1 follow-ups
+
+- [ ] Auth gate between Alice and UTA: Step 6 left them on 127.0.0.1
+      loopback with zero auth (decision: same-host, same-user, zero
+      security benefit from in-process tokens). Lands together with
+      public-internet deployment of Alice — UTA on different host
+      starts mattering then.
+
+- [ ] Public-internet deployment story: admin-token + session cookie
+      flow on Alice when bound to 0.0.0.0. Doc + Caddyfile/Tailscale
+      sample in README. `memory/project_cloud_frontend_conversion_secondary.md`
+      has the framing.
+
+- [ ] Physical migration of UTA off the Alice host (mobile PWA / home
+      always-on box). The protocol package `@traderalice/uta-protocol`
+      is the long-term boundary contract; only `OPENALICE_UTA_URL`
+      needs to change on the Alice side.
+
+- [ ] `services/uta` standalone `tsc --noEmit` OOMs. Vitest handles
+      type checking at test time + root tsc covers Alice scope, so
+      it's not blocking — but IDE single-file diagnostics on
+      services/uta files are inconsistent until either TS project
+      references land or the heap budget is bumped.
+
+- [ ] `as unknown as UTAManagerSDK` casts in trading-tools.spec +
+      a couple e2e specs. Real `UTAManager` and `UTAManagerSDK` share
+      method shapes but not class identity. Extract a `UTAManagerLike`
+      interface in `uta-protocol` so the cast goes away.
+
+- [ ] ESLint guard preventing `src/` from reaching back into
+      `services/uta/src/*` — structurally already broken (directory
+      doesn't exist on the Alice path), but an explicit lint rule
+      catches a future drift. Repo has no ESLint config today; setting
+      one up is a separate pass.
+
 ## Events / Automation
 
 - [ ] `task.requested`: add optional `silent?: boolean` to the payload so

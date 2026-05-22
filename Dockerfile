@@ -86,6 +86,11 @@ COPY --from=build /src/package.json               ./package.json
 # with ERR_MODULE_NOT_FOUND at startup.
 COPY --from=build /src/packages                   ./packages
 COPY --from=build /src/services/uta/package.json  ./services/uta/package.json
+# UTA's broker SDK deps (ccxt / longbridge / alpaca-trade-api) live in
+# services/uta/package.json after Step 8 cleanup, so Node resolution
+# from the bundled `services/uta/dist/uta.js` needs the local
+# node_modules tree alongside (pnpm symlinks into ../../node_modules/.pnpm).
+COPY --from=build /src/services/uta/node_modules  ./services/uta/node_modules
 # Guardian supervisor lives in the scripts/ tree; only the prod entry is
 # needed at runtime, but copying the directory keeps the file path the
 # CMD references stable.
