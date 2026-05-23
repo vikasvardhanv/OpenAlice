@@ -366,6 +366,38 @@ Native `cmd.exe` / PowerShell alone are not supported (no `bash`, no POSIX utili
 
 Note: we don't currently dogfood OpenAlice on Windows, so the broader experience (PTY rendering, file watching, paths with spaces) may have rough edges. Bug reports very welcome.
 
+## Authentication
+
+OpenAlice has a single admin-token gate at the web boundary. Three modes,
+keyed off whether the bound interface is loopback:
+
+**Local dev** (`pnpm dev`) — zero friction. Requests from `127.0.0.1` /
+`::1` skip the gate entirely. You won't see a login screen and don't need
+to know auth exists. This passthrough is disabled if you set
+`OPENALICE_TRUSTED_PROXIES` (because with a proxy in front, every request
+looks like localhost to Alice — trusting it would let the public in).
+
+**Server / Docker / LAN-exposed** — a 256-bit admin token is generated on
+first boot and printed **once** to stdout. Grab it, paste it into the
+login screen on first browser visit, the session cookie lasts 7 days.
+
+```bash
+# Find the token from your container or process logs:
+docker logs openalice 2>&1 | grep -A1 'admin token'
+```
+
+**Rotate the token** — delete `data/config/auth.json` and restart. The
+next boot prints a fresh token and revokes all existing sessions.
+
+**Escape hatch** — `OPENALICE_DISABLE_AUTH=1` turns the gate off. Only
+do this when something else guarantees the boundary (Tailscale ACL, VPN,
+reverse-proxy auth). Refusing to start with `bind=0.0.0.0` and no token
+is the default; this env flag is the explicit opt-out.
+
+What the gate covers: every `/api/*` route, the workspace PTY WebSocket,
+and CSRF (cross-origin mutations are 403'd via Origin allowlist). The
+React bundle itself is public — otherwise the login page couldn't load.
+
 ## Run on a server (Docker)
 
 For self-hosting on a VPS or always-on box. The image bundles `claude` and
@@ -385,7 +417,9 @@ docker exec -it openalice claude        # OAuth: paste URL into any browser
 docker exec -it openalice codex login   # same dance for codex
 ```
 
-Then open `http://<your-server>:47331` in a browser.
+Then open `http://<your-server>:47331` in a browser. You'll hit the
+admin-token login screen — see [Authentication](#authentication) above
+for how to retrieve the first-run token from `docker logs`.
 
 **Notes**
 
