@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { api, type Position, type WalletCommitLog, type EquityCurvePoint, type UTASnapshotSummary } from '../api'
 import { useAutoSave } from '../hooks/useAutoSave'
 import { useAccountHealth } from '../hooks/useAccountHealth'
+import { useWorkspace } from '../tabs/store'
 import { PageHeader } from '../components/PageHeader'
 import { EmptyState } from '../components/StateViews'
 import { EquityCurve } from '../components/EquityCurve'
@@ -277,7 +278,7 @@ export function PortfolioPage() {
 
             {/* Empty states */}
             {data.accounts.length === 0 && !loading && (
-              <EmptyState title="No trading accounts connected." description="Configure connections in the Trading page." />
+              <NoAccountsEmpty />
             )}
             {data.accounts.length > 0 && allPositions.length === 0 && !loading && (
               <EmptyState title="No open positions." />
@@ -332,6 +333,31 @@ async function fetchPortfolioData(): Promise<PortfolioData> {
   } catch {
     return EMPTY
   }
+}
+
+// ==================== Empty: no trading accounts ====================
+
+function NoAccountsEmpty() {
+  const openOrFocus = useWorkspace((s) => s.openOrFocus)
+  const setSidebar = useWorkspace((s) => s.setSidebar)
+  const goToTradingSettings = () => {
+    setSidebar('settings')
+    openOrFocus({ kind: 'settings', params: { category: 'trading' } })
+  }
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center">
+      <p className="text-sm font-medium text-text-muted">No trading accounts connected.</p>
+      <p className="text-[12px] text-text-muted/60 mt-1.5 max-w-[320px]">
+        Portfolio shows live equity, positions and PnL across all your brokers. Add a connection to get started.
+      </p>
+      <button
+        onClick={goToTradingSettings}
+        className="mt-4 btn-primary text-[12px]"
+      >
+        Add broker in Settings → Trading
+      </button>
+    </div>
+  )
 }
 
 // ==================== Hero Metrics ====================

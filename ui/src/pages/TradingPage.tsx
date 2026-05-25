@@ -1,5 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState, useEffect, useMemo } from 'react'
 import { Field, inputClass } from '../components/form'
 import { SDKSelector } from '../components/SDKSelector'
 import type { SDKOption } from '../components/SDKSelector'
@@ -10,13 +9,18 @@ import { PageHeader } from '../components/PageHeader'
 import { Dialog } from '../components/uta/Dialog'
 import { HealthBadge } from '../components/uta/HealthBadge'
 import { SchemaFormFields } from '../components/uta/SchemaFormFields'
-import { Metric, signFromDelta } from '../components/Metric'
-import { Sparkline } from '../components/Sparkline'
-import { fmt, fmtPnl, fmtPctSigned } from '../lib/format'
+import { EditUTADialog } from '../components/uta/EditUTADialog'
+import { fmt } from '../lib/format'
 import { api } from '../api'
-import type { UTAConfig, BrokerPreset, BrokerHealthInfo, TestConnectionResult, Position, AccountInfo, EquityCurvePoint } from '../api/types'
+import { useWorkspace } from '../tabs/store'
+import type { UTAConfig, BrokerPreset, BrokerHealthInfo, TestConnectionResult, Position, AccountInfo } from '../api/types'
 
 // ==================== Live equity (across all UTAs) ====================
+//
+// TradingPage is the CRUD surface for broker connections. The single
+// per-card equity number is here as a liveness signal — "this connection
+// returned real account data" — not as a portfolio view. Aggregate
+// equity, sparklines, 24h deltas, and trade logs live in Portfolio.
 
 interface EquitySummary {
   totalEquity: string
@@ -26,105 +30,50 @@ interface EquitySummary {
   accounts: Array<{ id: string; label: string; equity: string; cash: string }>
 }
 
-interface PerUtaCurve { values: number[]; firstAtCutoff: number | null; latest: number | null }
-
-interface CurveSummary {
-  /** Aggregate (across all UTAs) — feeds the hero banner. */
-  total: { values: number[]; firstAtCutoff: number | null; latest: number | null }
-  /** Per-UTA curves — feed the per-card sparkline + 24h delta. */
-  perUta: Record<string, PerUtaCurve>
-}
-
-const CUTOFF_24H_MS = 24 * 60 * 60 * 1000
-
-/** Build a curve summary from equity-curve points: latest value + the
- *  oldest value still within the trailing 24h window (the "baseline"
- *  for today PnL). */
-function summarizeCurve(points: EquityCurvePoint[]): CurveSummary {
-  const sorted = [...points].sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-  const cutoff = Date.now() - CUTOFF_24H_MS
-
-  const totalValues: number[] = []
-  let totalFirstAtCutoff: number | null = null
-  let totalLatest: number | null = null
-  const perUtaValues = new Map<string, number[]>()
-  const perUtaFirstAtCutoff = new Map<string, number>()
-  const perUtaLatest = new Map<string, number>()
-
-  for (const p of sorted) {
-    const t = new Date(p.timestamp).getTime()
-    const totalN = Number(p.equity)
-    if (Number.isFinite(totalN)) {
-      totalValues.push(totalN)
-      totalLatest = totalN
-      if (t >= cutoff && totalFirstAtCutoff == null) totalFirstAtCutoff = totalN
-    }
-    for (const [id, raw] of Object.entries(p.accounts ?? {})) {
-      const n = Number(raw)
-      if (!Number.isFinite(n)) continue
-      let arr = perUtaValues.get(id)
-      if (!arr) { arr = []; perUtaValues.set(id, arr) }
-      arr.push(n)
-      perUtaLatest.set(id, n)
-      if (t >= cutoff && !perUtaFirstAtCutoff.has(id)) perUtaFirstAtCutoff.set(id, n)
-    }
-  }
-
-  const perUta: Record<string, PerUtaCurve> = {}
-  for (const [id, values] of perUtaValues) {
-    perUta[id] = {
-      values,
-      firstAtCutoff: perUtaFirstAtCutoff.get(id) ?? null,
-      latest: perUtaLatest.get(id) ?? null,
-    }
-  }
-
-  return {
-    total: { values: totalValues, firstAtCutoff: totalFirstAtCutoff, latest: totalLatest },
-    perUta,
-  }
-}
-
 // ==================== Page ====================
 
 export function TradingPage() {
   const tc = useTradingConfig()
   const healthMap = useAccountHealth()
-  const navigate = useNavigate()
+  const openOrFocus = useWorkspace((s) => s.openOrFocus)
+  const setSidebar = useWorkspace((s) => s.setSidebar)
   const [showAdd, setShowAdd] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [presets, setPresets] = useState<BrokerPreset[]>([])
   const [equity, setEquity] = useState<EquitySummary | null>(null)
-  const [curve, setCurve] = useState<CurveSummary | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
   useEffect(() => {
     api.trading.getBrokerPresets().then(r => setPresets(r.presets)).catch(() => {})
   }, [])
 
-  // Live aggregates: pull `equity()` for headline numbers and `equityCurve()`
-  // for trend + 24h delta. One fetch each per cycle, shared across the
-  // hero banner + every UTA card. Polling cadence (30s) is informational —
-  // user can drill into a UTA for the 15s refresh of broker state.
-  const refreshAggregates = useCallback(async () => {
-    try {
-      const [eq, cv] = await Promise.all([
-        api.trading.equity().catch(() => null),
-        api.trading.equityCurve({ limit: 1500 }).catch(() => ({ points: [] as EquityCurvePoint[] })),
-      ])
-      if (eq) setEquity(eq)
-      setCurve(summarizeCurve(cv.points))
-      setLastUpdated(new Date())
-    } catch {
-      // Don't surface — aggregates are nice-to-have, the page still renders
-      // from useTradingConfig if the equity endpoint is down.
+  // Per-card liveness signal — `equity()` lets each card show "this
+  // connection actually returned an account balance" rather than just
+  // "ping went through". 60s cadence is enough; trend/sparkline/aggregate
+  // moved to Portfolio.
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      const eq = await api.trading.equity().catch(() => null)
+      if (cancelled) return
+      if (eq) {
+        setEquity(eq)
+        setLastUpdated(new Date())
+      }
     }
+    refresh()
+    const id = setInterval(refresh, 60_000)
+    return () => { cancelled = true; clearInterval(id) }
   }, [])
 
-  useEffect(() => {
-    refreshAggregates()
-    const id = setInterval(refreshAggregates, 30_000)
-    return () => clearInterval(id)
-  }, [refreshAggregates])
+  const editingUTA = editingId ? tc.utas.find(u => u.id === editingId) : null
+  const editingPreset = editingUTA ? presets.find(p => p.id === editingUTA.presetId) : undefined
+
+  const openInPortfolio = (id: string) => {
+    setEditingId(null)
+    setSidebar('portfolio')
+    openOrFocus({ kind: 'uta-detail', params: { id } })
+  }
 
   if (tc.loading) return <PageShell subtitle="Loading..." />
   if (tc.error) {
@@ -149,32 +98,27 @@ export function TradingPage() {
           {tc.utas.length === 0 ? (
             <EmptyState onAdd={() => setShowAdd(true)} />
           ) : (
-            <>
-              {equity && <PortfolioBanner equity={equity} curve={curve?.total ?? null} />}
-
-              <div className="space-y-2.5">
-                {tc.utas.map((uta) => {
-                  const equityRow = equity?.accounts.find(a => a.id === uta.id) ?? null
-                  return (
-                    <UTACard
-                      key={uta.id}
-                      uta={uta}
-                      preset={presets.find(p => p.id === uta.presetId)}
-                      health={healthMap[uta.id]}
-                      equity={equityRow}
-                      curve={curve?.perUta[uta.id] ?? null}
-                      onClick={() => navigate(`/uta/${uta.id}`)}
-                    />
-                  )
-                })}
-                <button
-                  onClick={() => setShowAdd(true)}
-                  className="w-full py-2.5 text-[12px] text-text-muted hover:text-text border border-dashed border-border hover:border-text-muted/40 rounded-lg transition-colors"
-                >
-                  + Add UTA
-                </button>
-              </div>
-            </>
+            <div className="space-y-2.5">
+              {tc.utas.map((uta) => {
+                const equityRow = equity?.accounts.find(a => a.id === uta.id) ?? null
+                return (
+                  <UTACard
+                    key={uta.id}
+                    uta={uta}
+                    preset={presets.find(p => p.id === uta.presetId)}
+                    health={healthMap[uta.id]}
+                    equity={equityRow}
+                    onClick={() => setEditingId(uta.id)}
+                  />
+                )
+              })}
+              <button
+                onClick={() => setShowAdd(true)}
+                className="w-full py-2.5 text-[12px] text-text-muted hover:text-text border border-dashed border-border hover:border-text-muted/40 rounded-lg transition-colors"
+              >
+                + Add UTA
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -190,14 +134,29 @@ export function TradingPage() {
             }
             setShowAdd(false)
             // Trigger a fresh fetch so the new UTA shows live numbers right away.
-            void refreshAggregates()
+            void api.trading.equity().then(setEquity).catch(() => {})
             return created
           }}
           onOpenExisting={(id) => {
             setShowAdd(false)
-            navigate(`/uta/${id}`)
+            setEditingId(id)
           }}
           onClose={() => setShowAdd(false)}
+        />
+      )}
+
+      {editingUTA && (
+        <EditUTADialog
+          uta={editingUTA}
+          preset={editingPreset}
+          health={healthMap[editingUTA.id]}
+          onSave={async (next) => { await tc.saveUTA(next) }}
+          onDelete={async () => {
+            await tc.deleteUTA(editingUTA.id)
+            setEditingId(null)
+          }}
+          onViewInPortfolio={() => openInPortfolio(editingUTA.id)}
+          onClose={() => setEditingId(null)}
         />
       )}
     </div>
@@ -233,48 +192,6 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
 
 // ==================== Portfolio banner (hero) ====================
 
-function PortfolioBanner({ equity, curve }: {
-  equity: EquitySummary
-  curve: { values: number[]; firstAtCutoff: number | null; latest: number | null } | null
-}) {
-  const total = Number(equity.totalEquity)
-  const cash = Number(equity.totalCash)
-  const unrealized = Number(equity.totalUnrealizedPnL)
-
-  // 24h delta from the curve summary. If curve is empty or the cutoff
-  // baseline isn't available (UTA freshly added), suppress the delta.
-  let deltaNode: React.ReactNode = null
-  if (curve && curve.latest != null && curve.firstAtCutoff != null) {
-    const delta = curve.latest - curve.firstAtCutoff
-    const pct = curve.firstAtCutoff !== 0 ? (delta / curve.firstAtCutoff) * 100 : 0
-    const sign = signFromDelta(delta)
-    const arrow = sign === 'up' ? '▲' : sign === 'down' ? '▼' : '·'
-    const color = sign === 'up' ? 'text-green' : sign === 'down' ? 'text-red' : 'text-text-muted'
-    deltaNode = (
-      <span className={`text-[14px] tabular-nums ${color}`}>
-        {arrow} {fmtPnl(delta, 'USD')} ({fmtPctSigned(pct)}) today
-      </span>
-    )
-  }
-
-  return (
-    <div className="rounded-lg border border-border bg-bg-secondary px-5 py-4">
-      <p className="text-[11px] text-text-muted uppercase tracking-wide mb-1">Total Portfolio · USD</p>
-      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <span className="text-[26px] md:text-[30px] font-bold tabular-nums text-text">
-          {fmt(total, 'USD')}
-        </span>
-        {deltaNode}
-      </div>
-      <div className="mt-2.5 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-text-muted">
-        <span>Cash <span className="text-text tabular-nums">{fmt(cash, 'USD')}</span></span>
-        <span className="text-text-muted/40">·</span>
-        <span>Unrealized <span className={`tabular-nums ${unrealized >= 0 ? 'text-green' : 'text-red'}`}>{fmtPnl(unrealized, 'USD')}</span></span>
-      </div>
-    </div>
-  )
-}
-
 // ==================== Subtitle builder ====================
 
 function buildSubtitle(uta: UTAConfig, preset?: BrokerPreset): string {
@@ -300,12 +217,11 @@ function buildSubtitle(uta: UTAConfig, preset?: BrokerPreset): string {
 
 // ==================== UTA Card ====================
 
-function UTACard({ uta, preset, health, equity, curve, onClick }: {
+function UTACard({ uta, preset, health, equity, onClick }: {
   uta: UTAConfig
   preset?: BrokerPreset
   health?: BrokerHealthInfo
   equity?: { equity: string; cash: string } | null
-  curve?: PerUtaCurve | null
   onClick: () => void
 }) {
   const isDisabled = health?.disabled || uta.enabled === false
@@ -313,23 +229,21 @@ function UTACard({ uta, preset, health, equity, curve, onClick }: {
     ? { text: preset.badge, color: `${preset.badgeColor} ${preset.badgeColor.replace('text-', 'bg-')}/10` }
     : { text: uta.presetId.slice(0, 2).toUpperCase(), color: 'text-text-muted bg-text-muted/10' }
 
-  // 24h delta for this UTA.
-  const delta = curve && curve.latest != null && curve.firstAtCutoff != null
-    ? { value: curve.latest - curve.firstAtCutoff, pct: curve.firstAtCutoff !== 0 ? ((curve.latest - curve.firstAtCutoff) / curve.firstAtCutoff) * 100 : 0 }
-    : null
-
-  const sparkValues = curve?.values ?? []
-  const showSpark = !isDisabled && sparkValues.length >= 2
-
+  // Per-card equity is a liveness signal, not a portfolio view —
+  // proves the connection returned a real account balance, not just
+  // a ping. Aggregate / curves / per-account drill-in all live in
+  // Portfolio.
   const equityNum = equity ? Number(equity.equity) : null
-  const cashNum = equity ? Number(equity.cash) : null
+  const equityNode = !isDisabled && equityNum != null && Number.isFinite(equityNum)
+    ? <span className="tabular-nums">{fmt(equityNum, 'USD')}</span>
+    : null
 
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left rounded-lg border border-border bg-bg-secondary/30 px-4 py-3.5 transition-all hover:border-text-muted/40 hover:bg-bg-tertiary/20 ${isDisabled ? 'opacity-50' : ''}`}
+      className={`w-full text-left rounded-lg border border-border bg-bg-secondary/30 px-4 py-3 transition-all hover:border-text-muted/40 hover:bg-bg-tertiary/20 ${isDisabled ? 'opacity-50' : ''}`}
     >
-      <div className="flex items-center gap-3 mb-2.5">
+      <div className="flex items-center gap-3">
         <span className={`text-[10px] font-bold px-2 py-1 rounded-md shrink-0 ${badge.color}`}>
           {badge.text}
         </span>
@@ -342,39 +256,15 @@ function UTACard({ uta, preset, health, equity, curve, onClick }: {
             {uta.guards.length > 0 && <span className="ml-1.5 text-text-muted/50">{uta.guards.length} guard{uta.guards.length > 1 ? 's' : ''}</span>}
           </div>
         </div>
-        <div className="shrink-0">
+        <div className="shrink-0 flex items-center gap-3">
+          {equityNode && (
+            <span className="text-[11px] text-text-muted/80 hidden sm:inline">{equityNode}</span>
+          )}
           {uta.enabled === false
             ? <span className="text-[11px] text-text-muted">Disabled</span>
             : <HealthBadge health={health} />
           }
         </div>
-      </div>
-
-      <div className="flex items-end justify-between gap-3">
-        <div className="min-w-0">
-          {equityNum != null && Number.isFinite(equityNum) ? (
-            <p className="text-[22px] font-bold tabular-nums text-text leading-tight">
-              {fmt(equityNum, 'USD')}
-            </p>
-          ) : (
-            <p className="text-[16px] text-text-muted/70 italic">live data unavailable</p>
-          )}
-          {delta && (
-            <p className={`text-[12px] tabular-nums mt-0.5 ${delta.value >= 0 ? 'text-green' : 'text-red'}`}>
-              {delta.value >= 0 ? '▲' : '▼'} {fmtPnl(delta.value, 'USD')} ({fmtPctSigned(delta.pct)}) today
-            </p>
-          )}
-          {cashNum != null && Number.isFinite(cashNum) && (
-            <p className="text-[11px] text-text-muted mt-1">
-              Cash <span className="text-text-muted tabular-nums">{fmt(cashNum, 'USD')}</span>
-            </p>
-          )}
-        </div>
-        {showSpark && (
-          <div className="hidden md:block shrink-0">
-            <Sparkline values={sparkValues} width={120} height={42} color="auto" />
-          </div>
-        )}
       </div>
     </button>
   )

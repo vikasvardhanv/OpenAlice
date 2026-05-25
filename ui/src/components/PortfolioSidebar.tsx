@@ -39,7 +39,7 @@ export function PortfolioSidebar() {
           <p className="px-3 py-1 text-[12px] text-text-muted/60">Loading…</p>
         ) : utas.length === 0 ? (
           <p className="px-3 py-1 text-[12px] text-text-muted/60 leading-snug">
-            No accounts yet. Add one in Settings → Trading Accounts.
+            No accounts yet. Add one in Settings → Trading.
           </p>
         ) : (
           utas.map((uta) => {

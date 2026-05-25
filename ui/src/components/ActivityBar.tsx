@@ -1,4 +1,4 @@
-import { type LucideIcon, MessageSquare, MessagesSquare, Inbox, Bell, LineChart, GitBranch, BarChart3, Newspaper, Zap, Settings, Code2, TerminalSquare, ChevronDown, Plug, Landmark, Info } from 'lucide-react'
+import { type LucideIcon, MessageSquare, MessagesSquare, Inbox, Bell, LineChart, GitBranch, BarChart3, Newspaper, Zap, Settings, Code2, TerminalSquare, ChevronDown, Plug, Info } from 'lucide-react'
 import { useState } from 'react'
 import { type Page } from '../App'
 import { useWorkspace } from '../tabs/store'
@@ -25,7 +25,6 @@ function activitySectionFor(page: Page): ActivitySection {
     case 'traditional-chat':     return 'traditional-chat'
     case 'notifications-legacy': return 'notifications-legacy'
     case 'connectors-legacy':    return 'connectors-legacy'
-    case 'trading-accounts':     return 'trading-accounts'
   }
 }
 
@@ -101,20 +100,18 @@ const NAV_SECTIONS: NavSection[] = [
       { page: 'news',       label: 'News',       icon: Newspaper, defaultTab: { kind: 'news', params: {} } },
     ],
   },
-  // Beta — functional but unstable. Goal: unified abstraction across
-  // broker accounts (Trading Accounts) + the Trading-as-Git workflow
-  // + the Portfolio view that surfaces it. Large engineering ahead,
-  // no fixed timeline — configurable today, but lock-in cost can
-  // change as the abstraction settles. Default-expanded because the
-  // items here are actively useful; the Beta label is the right
-  // amount of caution, not a hide.
+  // Beta — functional but unstable. The underlying cross-broker
+  // unification (UTA abstraction, FX/options/futures) is in active
+  // rearchitecture. Portfolio surfaces that state; Trading-as-Git is
+  // the operations side (pending broker writes). Broker connection
+  // CRUD lives under Settings → Trading, not here — it's a config
+  // surface, not a state/ops one.
   {
     sectionLabel: 'Beta',
-    description: 'Goal here is a unified abstraction across broker accounts (deposit/withdraw, options, futures, FX). Large engineering effort, no fixed timeline. Configure and try, but don\'t depend on schema or UX as stable yet.',
+    description: 'Cross-broker unified state + ops surfaces. The abstraction underneath is still being settled — try them, but don\'t depend on schema or UX as stable yet. Broker connection setup lives in Settings → Trading.',
     items: [
-      { page: 'trading-accounts', label: 'Trading Accounts', icon: Landmark, defaultTab: { kind: 'settings', params: { category: 'trading' } } },
-      { page: 'trading-as-git',   label: 'Trading as Git',   icon: GitBranch },
-      { page: 'portfolio',        label: 'Portfolio',        icon: LineChart, defaultTab: { kind: 'portfolio', params: {} } },
+      { page: 'trading-as-git', label: 'Trading as Git', icon: GitBranch },
+      { page: 'portfolio',      label: 'Portfolio',      icon: LineChart, defaultTab: { kind: 'portfolio', params: {} } },
     ],
   },
   {

@@ -7,24 +7,16 @@ type SettingsCategory = Extract<ViewSpec, { kind: 'settings' }>['params']['categ
 interface CategoryItem {
   label: string
   category: SettingsCategory
-  /**
-   * Other view kinds that count as "active" for this row. Used by
-   * Trading Accounts: when a uta-detail tab is focused, Trading
-   * Accounts should still light up.
-   */
-  alsoActiveFor?: ViewSpec['kind'][]
 }
 
 const CATEGORIES: CategoryItem[] = [
-  { label: 'General', category: 'general' },
-  { label: 'AI Provider', category: 'ai-provider' },
-  // Trading Accounts moved to its own ActivityBar Beta entry — see
-  // TradingAccountsBetaSidebar. The `settings/trading` ViewSpec is
-  // still the underlying tab.
+  { label: 'General',      category: 'general' },
+  { label: 'AI Provider',  category: 'ai-provider' },
+  { label: 'Trading',      category: 'trading' },
   // Connectors moved to its own ActivityBar Legacy entry — see
   // ConnectorsLegacySidebar.
-  { label: 'MCP Server', category: 'mcp' },
-  { label: 'Market Data', category: 'market-data' },
+  { label: 'MCP Server',   category: 'mcp' },
+  { label: 'Market Data',  category: 'market-data' },
   { label: 'News Sources', category: 'news-collector' },
 ]
 
@@ -41,8 +33,7 @@ export function SettingsCategoryList() {
     <div className="py-0.5">
       {CATEGORIES.map((item) => {
         const active =
-          (focused?.kind === 'settings' && focused.params.category === item.category) ||
-          (item.alsoActiveFor != null && focused != null && item.alsoActiveFor.includes(focused.kind))
+          focused?.kind === 'settings' && focused.params.category === item.category
         return (
           <SidebarRow
             key={item.category}
