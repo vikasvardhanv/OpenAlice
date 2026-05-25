@@ -39,22 +39,40 @@ wiring. When working on one of these, read its guide first:
   list of files to touch for each kind of change, plus a "common pitfalls"
   section for the kinds of things AI sessions have historically half-done.
 
-## Working with TODO.md
+## Surfacing future work — Linear, not TODO.md
 
-`TODO.md` at the repo root is the running backlog — deferred work, known
-bugs, security gaps, and design items sitting in the on-deck circle.
-Unfinished items there compound over time if they're forgotten.
+When a session notices something worth fixing later but **out of scope
+for the current change**, file a Linear issue. Don't add to a
+repo-internal TODO file (the old `TODO.md` was retired; it accumulated
+~550 lines of mixed-quality entries that no one read).
 
-- **Before starting non-trivial work**, scan `TODO.md` for related entries.
-  If there's one, either (a) handle it as part of the current change, or
-  (b) confirm with the user why you're skipping it so it doesn't drift.
-- **When finishing a change**, if it resolves a TODO entry, delete that
-  entry in the same commit (git log is the history — the file is a
-  future-looking list, not an audit trail).
-- **When a new item surfaces mid-work** — a known-broken behaviour you
-  don't have scope to fix, a security concern, a half-done UI surface —
-  add it with enough context (symptom + suspected location) that the
-  next person can start without re-derivation.
+**Where to file:**
+
+- Team: `Angelkawaii` (key `ANG`)
+- Project: `TODO from AI Code` —
+  https://linear.app/angelkawaii/project/todo-from-ai-code-0f966d818f84
+
+**What to file:** known-broken behavior, structural findings (wrong
+primary key, missing field projection, etc.), half-done UI surfaces,
+security concerns flagged during review.
+
+**What an issue should contain:**
+
+- **Symptom** — what's wrong or missing
+- **Suspected location** — file + rough line range, so the next person
+  doesn't have to re-derive
+- **Why deferred** — what blocked handling it inline
+- **Cross-references** — related PRs, commits, other issues
+
+Write each issue as if handing context to a stranger six months from
+now who has access to git but not to your reasoning.
+
+**What does NOT go here:** product feature requests (those live in the
+user's own product-planning surface), generic tech debt with no concrete
+trigger, items already covered by an open PR.
+
+If the session itself is genuinely going to handle the finding in the
+current PR, just handle it — no issue needed.
 
 ## Working with README.md
 
@@ -314,190 +332,158 @@ without polluting the global tool list).
 ## Git Workflow
 
 - `origin` = `TraderAlice/OpenAlice` (production)
-- `dev` branch for all development, `master` only via PR
-- **Never** force push master, **never** push `archive/dev` (contains old API keys)
-- CLAUDE.md is **committed to the repo and publicly visible** — never put API keys, personal paths, or sensitive information in it
+- `master` is the only long-living branch. **All PRs target master.**
+- `local` is the local-collaboration branch (see below). It's a regular
+  feature branch in shape, but pinned to a fixed name so multiple local
+  AI sessions sharing one git worktree don't fight over checkouts.
+- `dev` is **retired** — it accumulated a `dev`-specific paradigm from
+  the rolling-PR era. Don't open new work on it; don't delete it either.
+  Historical commits stay where they are.
+- **Never** force push master, **never** push `archive/dev` (contains
+  old API keys).
+- CLAUDE.md is **committed to the repo and publicly visible** — never
+  put API keys, personal paths, or sensitive information in it.
 
-### Branch Safety Rules
+### Two collaboration modes — pick the right one first
 
-- **NEVER delete `dev` or `master` branches** — both are protected on GitHub (`allow_deletions: false`, `allow_force_pushes: false`)
-- When merging PRs, **NEVER use `--delete-branch`** — it deletes the source branch and destroys commit history
-- When merging PRs, **prefer `--merge` over `--squash`** — squash destroys individual commit history. If the PR has clean, meaningful commits, merge them as-is
-- If squash is needed (messy history), do it — but never combine with `--delete-branch`
-- `archive/dev-pre-beta6` is a historical snapshot — do not modify or delete
-- **After merging a PR**, always `git pull origin master` to sync local master. Stale local master causes confusion about what's merged and what's not.
-- **Before creating a PR**, always `git fetch origin master` to check what's already merged. Use `git log --oneline origin/master..HEAD` to verify only the intended commits are ahead. Stale local refs cause PRs with wrong diff.
+The whole workflow forks on one question:
 
-### Rolling dev → master PR convention
+| Mode | Who's working on this branch | Where |
+|---|---|---|
+| **Solo branch** | One AI session, exclusively | Cloud sandbox, ephemeral remote agent, or any one-PR-at-a-time scenario |
+| **Shared branch** | Multiple AI sessions in the same git worktree | The user's local machine — one checkout, many concurrent AI sessions can't independently swap branches |
 
-Multiple Claude sessions hit `dev` in parallel; GitHub allows only **one
-open PR per (head, base) pair** anyway. So we keep a single rolling PR
-from `dev → master` and **append** to its body each session instead of
-opening fresh — otherwise each new PR loses the context of what other
-sessions did.
+The reason a shared branch exists at all: in one local worktree you can't
+have two AI sessions checking out different branches simultaneously
+without one of them yanking the working tree out from under the other.
+A pinned shared branch (`local`) sidesteps that — every local session
+lands on the same checkout.
 
-**Before opening a new PR, always check first:**
+Cloud is the default; multi-AI parallel work happens **in the cloud, not
+in local worktrees**. Spinning up extra local worktrees for parallelism
+costs more in `pnpm install` / `data/` duplication / port juggling than
+it saves. Hand parallel tracks off to cloud Claude sessions.
+
+### Branch Safety Rules (apply to both modes)
+
+- **Never commit directly to master.** If a session opens and finds
+  `HEAD` is master, that's the cue to ask "are we local or remote?"
+  before touching anything — see the open-of-session checklist below.
+- **NEVER delete `master`, `dev`, or `local` branches** — `master` and
+  `dev` are GitHub-protected (`allow_deletions: false`,
+  `allow_force_pushes: false`). `local` is conventionally permanent too.
+- When merging PRs, **NEVER use `--delete-branch`** — destroys source
+  branch history. The branch can stay; future tooling needs the SHAs.
+- **Prefer `--merge` over `--squash`** — squash flattens individual
+  commits. Squash only when the history is genuinely messy and even
+  then never combined with `--delete-branch`.
+- `archive/dev-pre-beta6` is a historical snapshot — do not modify or
+  delete.
+- **After merging a PR**, always `git fetch origin && git pull origin master`
+  on the source branch to sync. Stale local refs cause PRs with wrong diff.
+
+### Open-of-session checklist (every session, first action)
+
+Every session — local OR cloud — runs these three steps before touching
+code. They're the entire price you pay for not landing on stale or wrong
+state.
 
 ```bash
-gh pr list --base master --head dev --state open --json number,title,body
+git fetch origin
+git status                              # what branch are we on right now?
+git log --oneline origin/master..HEAD   # what's ahead of master?
 ```
 
-- **If a PR exists** → append your section to its body with
-  `gh pr edit <num> --body-file <(...)`. Don't open a new one.
-- **If none exists** → open with `gh pr create` using the template below.
+Then branch on the result:
 
-**PR body template:**
+1. **`HEAD` is `master`** — do NOT start work here. Ask the user:
+   *"Local or remote session? If local, do you want to work on `local`,
+   or branch off for a focused feature (`feat/<name>`)?"*
+   Wait for direction; create / switch only after.
+
+2. **`HEAD` is a `feat/<name>` (or similar solo-purpose branch)** —
+   this is the cloud / solo-AI case. Bring it up to date with master
+   so the eventual PR has a clean diff:
+   ```bash
+   git merge origin/master  # or rebase, if no one else is on this branch
+   ```
+   Then continue the work.
+
+3. **`HEAD` is `local`** — this is the shared local-collab branch.
+   First sync master in (because cloud sessions may have shipped while
+   you were away), THEN continue:
+   ```bash
+   git pull origin local
+   git merge origin/master
+   ```
+   If the merge conflicts, resolve before doing anything else — another
+   local session may be waiting for the working tree.
+
+4. **`HEAD` is `dev` or some other historical branch** — flag it to the
+   user, don't assume it's intentional. `dev` is retired; if a session
+   landed there it's likely an accidental hold-over from a previous flow.
+
+### Cloud / solo-AI sessions (the default)
+
+This is the multi-agent-concurrent path. Each cloud session gets its
+own branch, its own PR, its own review cycle.
+
+```bash
+# Branch from master — never from dev or local
+git fetch origin
+git checkout master
+git pull origin master
+git checkout -b feat/<short-desc>     # cloud Claude Code may auto-name
+                                      # claude/<desc>-XXXXX — that's fine too
+
+# ... do the work ...
+
+git push -u origin feat/<short-desc>
+gh pr create --base master --head feat/<short-desc> \
+  --title "<title>" --body-file <(...)
+```
+
+PR body is just the standard Summary + Test plan — there's no
+"per-session contributions" stack anymore because each PR is one
+session's worth of work, end to end.
 
 ```markdown
 ## Summary
-<rolling thematic summary — latest session may rewrite this when new
-work meaningfully shifts the PR's framing>
-
-## Per-session contributions
-### YYYY-MM-DD — <session theme, e.g. "Market workbench tradeable card">
-- What changed (1–3 bullets)
-- Why
-- Key commits: `<sha-short>`, `<sha-short>`
-
-### YYYY-MM-DD — <prior session theme>
-…(append on top, keep prior sessions verbatim — never edit other sessions' entries)…
-
-## Full commit log
-<output of: git log --oneline origin/master..HEAD>
-(regenerate from scratch on each body update)
+<what changed and why — 1–4 bullets, written for a 30-second director-review>
 
 ## Test plan
 - [ ] tsc --noEmit clean
 - [ ] pnpm test passes
-- [ ] (session-specific manual verifications)
+- [ ] (whatever manual verifications apply)
+
+## Boundary touch
+<flag if this PR touches trading / auth / broker credentials / migrations.
+Omit if none.>
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
-**When you append:**
+After merge: `git checkout master && git pull origin master`. Don't
+keep working on the post-merge branch.
 
-1. Refresh the "Full commit log" section from `git log --oneline origin/master..HEAD`.
-2. Add your "Per-session contributions" entry on top of the list, with today's date.
-3. Don't edit other sessions' entries — that's their record.
-4. Update "Summary" only if your work actually changes the PR's framing
-   (e.g., what was a "frontend tweak" PR becomes a "frontend + new domain
-   service" PR after your work).
+### Local / shared `local` branch (the multi-AI-on-one-worktree exception)
 
-This keeps the PR description as a faithful audit trail across sessions,
-and lets reviewers see who-did-what without trawling the commit log alone.
-
-### Default vs. isolated branch — when to deviate from `dev`
-
-The default for any session is **work on `dev`** and let the rolling
-PR carry it to master. The exception is **invasive, long-running work
-that shouldn't share a branch with parallel sessions** — typically a
-refactor of shared types / cross-cutting infrastructure that, while
-in-flight, would force every other session to rebase against churn
-they don't have context for.
-
-Examples worth isolating: changing a base interface every broker
-implements; renaming or restructuring a module everyone imports from;
-multi-day schema migrations.
-Examples that stay on `dev`: any feature, any local fix, anything
-scoped to one subsystem.
-
-When isolation is the right call:
+When the user confirms a session is local and wants to work on `local`:
 
 ```bash
-# Branch from master (clean baseline, dev's churn won't bleed in)
+# First-time only, if `local` doesn't yet exist:
 git fetch origin
 git checkout master
 git pull origin master
-git checkout -b refactor/<short-name>
-
-# During the refactor, periodically rebase against master so the
-# eventual merge stays small. Skip dev — its session-by-session
-# churn is intentionally not part of the baseline you're testing
-# against.
-git fetch origin
-git rebase origin/master
-
-# When done, PR straight to master (NOT dev). The refactor is its own
-# coherent unit, reviewed end-to-end.
-git push -u origin refactor/<short-name>
-gh pr create --base master --head refactor/<short-name> ...
+git checkout -b local
+git push -u origin local
 ```
 
-**After the refactor merges**, dev needs to absorb the new master so
-in-flight sessions land on the new baseline:
+Subsequent local sessions: just `git checkout local` (open-of-session
+checklist already pulled origin and merged master).
 
-```bash
-git checkout dev
-git pull origin dev
-git fetch origin
-git merge origin/master
-git push origin dev
-```
+When `local` is ready to ship — either piecewise (one PR per coherent
+chunk, base `master`) or as a batch — that's a director decision, not a
+default. Ask the user before opening the PR.
 
-In-flight rolling-PR work then sees the refactor in their next pull
-and rebases naturally. Their diffs against the refreshed `dev` may
-need real fix-ups (that's the cost of an invasive refactor — and
-the reason you isolated it in the first place).
 
-**Decision rule for the next session that starts work:** if `master`
-is currently ahead of `dev`, do `git checkout dev && git merge origin/master`
-*before* starting any new feature work. Otherwise your new commits
-will land on a stale baseline.
-
-Common reasons `master` would be ahead of `dev`:
-- An invasive refactor branch just landed (above flow).
-- A Claude Code cloud session opened a `claude/<short-desc>-XXXXX`
-  branch and merged it straight to master without going through `dev`
-  — typically for a time-sensitive fix the cloud agent shipped while
-  the human wasn't around (see next subsection).
-
-When the side-channel was content-bearing (not just a refactor) **dev
-is genuinely behind master in code**, not just in merge-commit objects.
-Skipping the sync lands new dev commits on stale code.
-
-One quirk to recognize: a single `git merge origin/master` into dev
-often surfaces a Discord/webhook notification like *"N new commits on
-dev"* where N is much larger than what the side branch actually added.
-Most of those N are **historical PR-merge commits** that have been
-accumulating on master for weeks (each dev → master PR creates a
-merge commit that exists only on master). The sync drags them onto
-dev in one go. The webhook reports commit-object count, not
-content-delta. Expected, not a sign anything's broken.
-
-### Emergency hotfix via cloud `claude/*` side branch
-
-A Claude Code cloud session can open a branch named
-`claude/<short-desc>-XXXXX`, PR straight to master, and merge it
-without touching `dev`. This is the right move for **genuine
-emergencies** the user isn't around to handle on dev (a runtime
-error blocking users, a CORS misconfiguration, a hotfix that can't
-wait for the next dev → master cycle). The cloud session uses it
-because:
-
-- Cloud sessions don't see in-flight local dev state and shouldn't
-  destabilize it
-- The fix is small and reviewable in isolation
-- Waiting for the user to bounce dev for a hotfix is silly when the
-  cloud agent already has a working tree
-
-**What this means for the next local session:**
-
-1. `git fetch origin && git log --oneline origin/dev..origin/master`
-   shows commits master has that dev doesn't — if there's anything
-   from a `claude/*` branch, dev needs the sync.
-2. `git checkout dev && git merge origin/master && git push origin dev`
-   (clean FF in typical case).
-3. Resume normal work on dev.
-
-**What this means for the cloud session deciding whether to side-branch:**
-default to opening a dev → master PR like everyone else. Only branch
-straight to master for fixes that meet *both*: (a) production-impacting
-or user-blocking, and (b) sub-100-line scope reviewable end-to-end in
-one sitting. Anything bigger or speculative goes through dev.
-
-**Parallel work happens in the cloud, not in local worktrees.** For a
-project this size, spinning up multiple local worktrees costs more
-in `pnpm install` / `data/` copying / port juggling than it saves.
-Hand parallel tracks off to cloud Claude sessions instead — each
-gets its own sandbox, returns a PR, and doesn't touch the local
-working tree.
