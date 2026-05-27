@@ -1,40 +1,66 @@
 import { http, HttpResponse } from 'msw'
 import {
-  demoTradingAccount,
-  demoUTASummary,
+  demoTradingAccounts,
+  demoUTASummaries,
+  demoAccountByUTA,
   demoAccountInfo,
+  demoPositionsByUTA,
+  demoUTAConfigs,
   demoUTAConfig,
-  DEMO_UTA_ID,
+  demoEquityCurve,
+  demoEquityCurveByUTA,
+  demoSnapshotsByUTA,
 } from '../fixtures/trading'
+
+function totals() {
+  const accounts = demoTradingAccounts.map((a) => ({
+    id: a.id,
+    label: a.label,
+    equity: demoAccountByUTA[a.id]!.netLiquidation,
+    cash: demoAccountByUTA[a.id]!.totalCashValue,
+  }))
+  const sum = (key: 'netLiquidation' | 'totalCashValue' | 'unrealizedPnL' | 'realizedPnL') =>
+    demoTradingAccounts
+      .reduce((acc, a) => acc + Number(demoAccountByUTA[a.id]![key] ?? 0), 0)
+      .toFixed(2)
+  return {
+    totalEquity: sum('netLiquidation'),
+    totalCash: sum('totalCashValue'),
+    totalUnrealizedPnL: sum('unrealizedPnL'),
+    totalRealizedPnL: sum('realizedPnL'),
+    accounts,
+  }
+}
+
+function utaId(params: { id?: string | readonly string[] }): string {
+  const v = params.id
+  return Array.isArray(v) ? v[0] ?? '' : String(v ?? '')
+}
 
 export const tradingHandlers = [
   http.get('/api/trading/uta', () =>
-    HttpResponse.json({
-      utas: [demoTradingAccount],
-      summaries: [demoUTASummary],
-    }),
+    HttpResponse.json({ utas: demoTradingAccounts, summaries: demoUTASummaries }),
   ),
-
-  http.get('/api/trading/equity', () =>
+  http.get('/api/trading/equity', () => HttpResponse.json(totals())),
+  http.get('/api/trading/fx-rates', () =>
     HttpResponse.json({
-      totalEquity: '10000.00',
-      totalCash: '10000.00',
-      totalUnrealizedPnL: '0.00',
-      totalRealizedPnL: '0.00',
-      accounts: [
-        { id: DEMO_UTA_ID, label: 'Demo Paper Account', equity: '10000.00', cash: '10000.00' },
+      rates: [
+        { currency: 'USDT', rate: 1.0, source: 'demo', updatedAt: new Date().toISOString() },
+        { currency: 'EUR', rate: 1.08, source: 'demo', updatedAt: new Date().toISOString() },
       ],
     }),
   ),
-
-  http.get('/api/trading/fx-rates', () => HttpResponse.json({ rates: [] })),
 
   http.post('/api/trading/uta/:id/reconnect', () =>
     HttpResponse.json({ success: true, message: 'Demo mode — reconnect is a no-op.' }),
   ),
 
-  http.get('/api/trading/uta/:id/account', () => HttpResponse.json(demoAccountInfo)),
-  http.get('/api/trading/uta/:id/positions', () => HttpResponse.json({ positions: [] })),
+  http.get('/api/trading/uta/:id/account', ({ params }) =>
+    HttpResponse.json(demoAccountByUTA[utaId(params)] ?? demoAccountInfo),
+  ),
+  http.get('/api/trading/uta/:id/positions', ({ params }) =>
+    HttpResponse.json({ positions: demoPositionsByUTA[utaId(params)] ?? [] }),
+  ),
   http.get('/api/trading/uta/:id/orders', () => HttpResponse.json({ orders: [] })),
   http.get('/api/trading/uta/:id/market-clock', () =>
     HttpResponse.json({
@@ -83,7 +109,7 @@ export const tradingHandlers = [
   ),
 
   http.get('/api/trading/config/broker-presets', () => HttpResponse.json({ presets: [] })),
-  http.get('/api/trading/config', () => HttpResponse.json({ utas: [demoUTAConfig] })),
+  http.get('/api/trading/config', () => HttpResponse.json({ utas: demoUTAConfigs })),
   http.post('/api/trading/config/uta', () => HttpResponse.json(demoUTAConfig, { status: 201 })),
   http.put('/api/trading/config/uta/:id', () => HttpResponse.json(demoUTAConfig)),
   http.delete('/api/trading/config/uta/:id', () => HttpResponse.json({ ok: true })),
@@ -91,13 +117,19 @@ export const tradingHandlers = [
     HttpResponse.json({ success: true, account: demoAccountInfo }),
   ),
 
-  http.get('/api/trading/uta/:id/snapshots', () => HttpResponse.json({ snapshots: [] })),
+  http.get('/api/trading/uta/:id/snapshots', ({ params }) =>
+    HttpResponse.json({ snapshots: demoSnapshotsByUTA[utaId(params)] ?? [] }),
+  ),
   http.delete('/api/trading/uta/:id/snapshots/:timestamp', () =>
     HttpResponse.json({ success: true }),
   ),
-  http.get('/api/trading/snapshots/equity-curve', () => HttpResponse.json({ points: [] })),
+  http.get('/api/trading/snapshots/equity-curve', ({ request }) => {
+    const id = new URL(request.url).searchParams.get('utaId')
+    const points = id ? demoEquityCurveByUTA[id] ?? [] : demoEquityCurve
+    return HttpResponse.json({ points })
+  }),
 
   http.get('/api/trading/contracts/search', () =>
-    HttpResponse.json({ results: [], count: 0, utasConfigured: 1 }),
+    HttpResponse.json({ results: [], count: 0, utasConfigured: demoTradingAccounts.length }),
   ),
 ]
