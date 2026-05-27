@@ -63,5 +63,9 @@ export default defineConfig({
     // and eliminates the "rm -rf dist → dist/ui never rebuilds" footgun.
     outDir: 'dist',
     emptyOutDir: true,
+    // ES2022 unlocks top-level await — used in main.tsx for the demo-mode
+    // dynamic import. All evergreen browsers (Chrome 89+, Safari 15+,
+    // Firefox 89+) support it; we have no legacy IE/old-Edge constraint.
+    target: 'es2022',
   },
 })

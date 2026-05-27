@@ -5,6 +5,7 @@ import { Sidebar } from './components/Sidebar'
 import { TabHost } from './components/TabHost'
 import { ChannelConfigModal } from './components/ChannelConfigModal'
 import { UpdateBanner } from './components/UpdateBanner'
+import { DemoBanner } from './demo/DemoBanner'
 import { ChannelsProvider, useChannels } from './contexts/ChannelsContext'
 import { WorkspacesProvider } from './contexts/WorkspacesContext'
 import { findSectionForActivity } from './sections'
@@ -120,6 +121,7 @@ function AppShell() {
 
   return (
     <div className="flex flex-col h-full">
+      {import.meta.env.VITE_DEMO_MODE && <DemoBanner />}
       <UpdateBanner />
       <div className="flex flex-1 min-h-0">
         <ActivityBar
