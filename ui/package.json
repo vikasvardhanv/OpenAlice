@@ -11,6 +11,7 @@
     "msw:init": "msw init ./public --save"
   },
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/addon-webgl": "^0.18.0",
