@@ -81,6 +81,23 @@ wiring. When working on one of these, read its guide first:
   list of files to touch for each kind of change, plus a "common pitfalls"
   section for the kinds of things AI sessions have historically half-done.
 
+- **Demo mode** — `ui/src/demo/` (MSW handlers + fixtures, deployed to
+  Vercel as the marketing demo). When you change a frontend surface that
+  uses `/api/*` — new endpoint, modified response shape, new UI page,
+  new sidebar item, retired surface — check that the corresponding
+  `ui/src/demo/handlers/<domain>.ts` still matches. Three recent crashes
+  (PRs #235, #238, #240) all came from this pattern: a refactor changed
+  what production code returns / expects, but the demo handler kept the
+  old (or invented an ad-hoc) shape, and `pnpm test` didn't catch it
+  because esbuild doesn't enforce types. Cheap habits that prevent this:
+  - When writing a demo handler, import the canonical type from
+    `ui/src/api/types.ts` (or wherever the contract lives), don't inline
+    an ad-hoc shape.
+  - `pnpm -F open-alice-ui dev:demo` and walk the affected surface
+    before declaring the refactor done. The `[demo] unmocked …` catchAll
+    `console.warn` log will surface endpoints you've added but not
+    mocked; visible crashes will surface shape mismatches.
+
 ## Surfacing future work — Linear, not TODO.md
 
 When a session notices something worth fixing later but **out of scope
