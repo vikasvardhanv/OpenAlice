@@ -54,7 +54,7 @@ WORKDIR /app
 # instead of getting dropped by Node's default PID-1 behaviour, and
 # zombies from short-lived children (workspace CLI auth flows, etc.)
 # get reaped.
-RUN apt-get update && apt-get install -y --no-install-recommends tini \
+RUN apt-get update && apt-get install -y --no-install-recommends tini git \
     && rm -rf /var/lib/apt/lists/*
 
 # Two agent CLIs installed globally so they're on PATH for the PTY
