@@ -27,6 +27,7 @@ COPY packages/opentypebb/package.json packages/opentypebb/
 COPY packages/uta-protocol/package.json packages/uta-protocol/
 COPY services/uta/package.json services/uta/
 COPY ui/package.json ui/
+COPY apps/desktop/package.json apps/desktop/
 
 RUN pnpm install --frozen-lockfile
 
